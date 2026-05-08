@@ -520,6 +520,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // distinguishes party-size from a controlled-creature count.
         parse_creatures_in_your_party_tail,
         parse_entered_this_turn_ref,
+        parse_tokens_created_this_turn_tail,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -1532,6 +1533,28 @@ fn parse_entered_this_turn_clause(input: &str) -> OracleResult<'_, (&str, bool)>
         |(type_text, inject_you)| (type_text, inject_you),
     )
     .parse(input)
+}
+
+/// CR 111.2: Parse "[type] tokens you created this turn" into the shared
+/// token-creation count. The player scope carries "you"; the filter carries
+/// token characteristics such as Treasure/Food/creature.
+fn parse_tokens_created_this_turn_tail(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, type_text) = take_until(" you created this turn").parse(input)?;
+    let (rest, _) = tag(" you created this turn").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        rest,
+        QuantityRef::TokensCreatedThisTurn {
+            player: PlayerScope::Controller,
+            filter,
+        },
+    ))
 }
 
 fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
@@ -3338,6 +3361,41 @@ mod tests {
         assert!(type_filters.contains(&TypeFilter::Creature));
         assert!(properties.contains(&FilterProp::NonToken));
         assert_eq!(controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn parse_quantity_ref_tokens_created_this_turn() {
+        let (rest, q) = parse_quantity_ref("the number of tokens you created this turn").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::TokensCreatedThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            } => assert!(properties.contains(&FilterProp::Token)),
+            other => panic!("expected controller TokensCreatedThisTurn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quantity_ref_treasure_tokens_created_this_turn() {
+        let (rest, q) =
+            parse_quantity_ref("the number of Treasure tokens you created this turn").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::TokensCreatedThisTurn {
+                player: PlayerScope::Controller,
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        properties,
+                        ..
+                    }),
+            } => {
+                assert!(type_filters.contains(&TypeFilter::Subtype("Treasure".to_string())));
+                assert!(properties.contains(&FilterProp::Token));
+            }
+            other => panic!("expected Treasure TokensCreatedThisTurn, got {other:?}"),
+        }
     }
 
     #[test]

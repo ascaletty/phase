@@ -130,6 +130,10 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::CardsDiscardedThisTurn {
                 player: PlayerScope::RecipientController,
             }
+            | QuantityRef::TokensCreatedThisTurn {
+                player: PlayerScope::RecipientController,
+                ..
+            }
             | QuantityRef::PartySize {
                 player: PlayerScope::RecipientController,
             } => true,
@@ -1352,6 +1356,25 @@ fn resolve_ref(
                         .get(&p.id)
                         .copied()
                         .unwrap_or_default(),
+                )
+            })
+        }
+        QuantityRef::TokensCreatedThisTurn { player, ref filter } => {
+            resolve_per_player_scalar(state, *player, controller, ctx, targets, |scoped_player| {
+                usize_to_i32_saturating(
+                    state
+                        .created_tokens_this_turn
+                        .iter()
+                        .filter(|record| {
+                            record.controller == scoped_player.id
+                                && matches_target_filter_on_zone_change_record(
+                                    state,
+                                    record,
+                                    filter,
+                                    &filter_ctx,
+                                )
+                        })
+                        .count(),
                 )
             })
         }
@@ -3741,6 +3764,70 @@ mod tests {
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(1)), 1);
+    }
+
+    /// CR 111.2: `TokensCreatedThisTurn` counts token-creation snapshots by
+    /// creator and token characteristics.
+    #[test]
+    fn resolve_quantity_tokens_created_this_turn_filters_token_snapshots() {
+        let mut state = GameState::new_two_player(42);
+        let clue = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Clue".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&clue).unwrap();
+            obj.controller = PlayerId(0);
+            obj.is_token = true;
+            obj.card_types.core_types = vec![CoreType::Artifact];
+            obj.card_types.subtypes = vec!["Clue".to_string()];
+        }
+        crate::game::restrictions::record_token_created(&mut state, clue);
+
+        let treasure = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            obj.controller = PlayerId(1);
+            obj.is_token = true;
+            obj.card_types.core_types = vec![CoreType::Artifact];
+            obj.card_types.subtypes = vec!["Treasure".to_string()];
+        }
+        crate::game::restrictions::record_token_created(&mut state, treasure);
+
+        let any_tokens = QuantityExpr::Ref {
+            qty: QuantityRef::TokensCreatedThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Any,
+            },
+        };
+        let treasure_tokens = QuantityExpr::Ref {
+            qty: QuantityRef::TokensCreatedThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                    "Treasure".to_string(),
+                ))),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &any_tokens, PlayerId(0), ObjectId(1)),
+            1
+        );
+        assert_eq!(
+            resolve_quantity(&state, &treasure_tokens, PlayerId(0), ObjectId(1)),
+            1
+        );
     }
 
     #[test]

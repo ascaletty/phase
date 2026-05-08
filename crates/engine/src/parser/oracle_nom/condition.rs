@@ -1408,6 +1408,7 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         // "no creatures are on the battlefield"
         parse_no_on_battlefield,
     ))
+    .or(parse_you_created_token_this_turn)
     .or(parse_you_discarded_card_this_turn)
     .or(parse_you_sacrificed_this_turn)
     .parse(input)
@@ -1899,6 +1900,22 @@ fn parse_discarded_card_this_turn_after_actor(input: &str) -> OracleResult<'_, S
 fn parse_you_discarded_card_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you ").parse(input)?;
     parse_discarded_card_this_turn_after_actor(rest)
+}
+
+fn parse_you_created_token_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you created ").parse(input)?;
+    let (rest, _) = alt((tag("a token"), tag("one or more tokens"))).parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::TokensCreatedThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Any,
+            },
+            1,
+        ),
+    ))
 }
 
 fn parse_you_sacrificed_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -4587,6 +4604,25 @@ mod tests {
                         player: PlayerScope::Opponent {
                             aggregate: AggregateFunction::Sum,
                         },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+    }
+
+    #[test]
+    fn you_created_a_token_this_turn_counts_controller_tokens() {
+        let (rest, c) = parse_inner_condition("you created a token this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::TokensCreatedThisTurn {
+                        player: PlayerScope::Controller,
+                        filter: TargetFilter::Any,
                     },
                 },
                 comparator: Comparator::GE,

@@ -2830,6 +2830,10 @@ pub struct GameState {
     pub creatures_blocked_this_turn: HashSet<ObjectId>,
     #[serde(default)]
     pub players_who_created_token_this_turn: HashSet<PlayerId>,
+    /// CR 111.2: Token creation snapshots this turn, preserving creation-time
+    /// characteristics for filtered "tokens you created this turn" quantities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_tokens_this_turn: Vec<ZoneChangeRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub counter_added_this_turn: Vec<CounterAddedRecord>,
     #[serde(default)]
@@ -3290,6 +3294,7 @@ impl GameState {
             creatures_attacked_this_turn: HashSet::new(),
             creatures_blocked_this_turn: HashSet::new(),
             players_who_created_token_this_turn: HashSet::new(),
+            created_tokens_this_turn: Vec::new(),
             counter_added_this_turn: Vec::new(),
             players_who_discarded_card_this_turn: HashSet::new(),
             cards_discarded_this_turn_by_player: HashMap::new(),
@@ -3503,6 +3508,7 @@ impl PartialEq for GameState {
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn
             && self.players_who_created_token_this_turn == other.players_who_created_token_this_turn
+            && self.created_tokens_this_turn == other.created_tokens_this_turn
             && self.counter_added_this_turn == other.counter_added_this_turn
             && self.players_who_discarded_card_this_turn
                 == other.players_who_discarded_card_this_turn

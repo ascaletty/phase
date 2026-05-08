@@ -192,6 +192,9 @@ pub fn record_token_created(state: &mut crate::types::game_state::GameState, obj
         state
             .players_who_created_token_this_turn
             .insert(obj.controller);
+        state
+            .created_tokens_this_turn
+            .push(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
     }
 }
 

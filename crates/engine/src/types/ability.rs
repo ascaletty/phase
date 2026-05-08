@@ -2331,6 +2331,14 @@ pub enum QuantityRef {
     /// discarded a card this turn" and "if an opponent discarded a card this
     /// turn" reuse the existing per-player aggregate axis.
     CardsDiscardedThisTurn { player: PlayerScope },
+    /// CR 111.2 + CR 603.4: Number of tokens created this turn, scoped by
+    /// `player` and filtered against each token's creation-time
+    /// characteristics. Covers "you created a token this turn" and dynamic
+    /// counts like "the number of tokens you created this turn".
+    TokensCreatedThisTurn {
+        player: PlayerScope,
+        filter: TargetFilter,
+    },
     /// CR 309.7: Number of dungeons the controller has completed.
     DungeonsCompleted,
     /// CR 107.3m: The value of X paid for the spell that produced the source

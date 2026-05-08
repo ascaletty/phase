@@ -81,9 +81,11 @@ function applyChainEntry(
       return printings.find((p) => p.border_color === "borderless") ?? null;
     case "prefer_extended":
       return printings.find((p) => p.frame_effects.includes("extendedart")) ?? null;
-    case "source_printing":
+    case "source_printing": {
       if (!source) return null;
-      return printings.find((p) => p.set === source.setCode && p.collector_number === source.collectorNumber) ?? null;
+      const setLower = source.setCode.toLowerCase();
+      return printings.find((p) => p.set === setLower && p.collector_number === source.collectorNumber) ?? null;
+    }
   }
 }
 

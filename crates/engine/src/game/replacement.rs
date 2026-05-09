@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Effect, PreventionAmount, QuantityExpr,
-    ReplacementCondition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
+    ReplacementCondition, ReplacementMode, ResolvedAbility, ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 
@@ -31,6 +31,33 @@ pub enum ReplacementResult {
 pub enum ApplyResult {
     Modified(ProposedEvent),
     Prevented,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PostReplacementEffect {
+    Definition(Box<AbilityDefinition>),
+    Resolved(Box<ResolvedAbility>),
+}
+
+fn stash_post_replacement_effect(
+    state: &mut GameState,
+    post: PostReplacementEffect,
+    source: ObjectId,
+    event_source: Option<ObjectId>,
+    event_target: Option<TargetRef>,
+) {
+    if state.post_replacement_effect.is_some() || state.post_replacement_resolved_effect.is_some() {
+        return;
+    }
+    match post {
+        PostReplacementEffect::Definition(def) => state.post_replacement_effect = Some(def),
+        PostReplacementEffect::Resolved(resolved) => {
+            state.post_replacement_resolved_effect = Some(resolved)
+        }
+    }
+    state.post_replacement_source = Some(source);
+    state.post_replacement_event_source = event_source;
+    state.post_replacement_event_target = event_target;
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -2565,23 +2592,29 @@ fn apply_single_replacement(
                     // apply to Damage events, where there is no `etb_counters`
                     // slot to absorb the counters into.
                     let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
-                    repl_def.execute.as_deref().and_then(|def| {
-                        // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
-                        // PutCounter/ChangeZone) in the sub_ability chain to find
-                        // the first non-modifier work. Covers both the existing
-                        // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
-                        // back) and composed replacements like Tap → BecomeCopy
-                        // (Vesuva "enter tapped as a copy").
-                        match EventModifiers::first_non_modifier_ability(Some(def)) {
-                            Some(real_work) => Some(Box::new(real_work.clone())),
-                            None if !is_damage
-                                && EventModifiers::has_only_event_modifier(Some(def)) =>
-                            {
-                                None
+                    if let Some(runtime) = repl_def.runtime_execute.clone() {
+                        Some(PostReplacementEffect::Resolved(runtime))
+                    } else {
+                        repl_def.execute.as_deref().and_then(|def| {
+                            // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
+                            // PutCounter/ChangeZone) in the sub_ability chain to find
+                            // the first non-modifier work. Covers both the existing
+                            // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
+                            // back) and composed replacements like Tap → BecomeCopy
+                            // (Vesuva "enter tapped as a copy").
+                            match EventModifiers::first_non_modifier_ability(Some(def)) {
+                                Some(real_work) => Some(PostReplacementEffect::Definition(
+                                    Box::new(real_work.clone()),
+                                )),
+                                None if !is_damage
+                                    && EventModifiers::has_only_event_modifier(Some(def)) =>
+                                {
+                                    None
+                                }
+                                _ => Some(PostReplacementEffect::Definition(Box::new(def.clone()))),
                             }
-                            _ => Some(Box::new(def.clone())),
-                        }
-                    })
+                        })
+                    }
                 }
                 _ => None,
             };
@@ -2642,15 +2675,10 @@ fn apply_single_replacement(
                 // pipeline wins; this matches how Optional replacements queue their
                 // accept-branch post-effect.
                 if let Some(post) = mandatory_post_effect {
-                    if state.post_replacement_effect.is_none() {
-                        state.post_replacement_effect = Some(post);
-                        state.post_replacement_source = Some(rid.source);
-                        // CR 615.5 + CR 609.7: only the Prevented arm populates
-                        // `post_replacement_event_source`; clear here so a prior
-                        // prevention's source can't leak into a non-prevention stash.
-                        state.post_replacement_event_source = None;
-                        state.post_replacement_event_target = None;
-                    }
+                    // CR 615.5 + CR 609.7: only the Prevented arm populates
+                    // `post_replacement_event_source`; clear here so a prior
+                    // prevention's source can't leak into a non-prevention stash.
+                    stash_post_replacement_effect(state, post, rid.source, None, None);
                 }
                 events.push(GameEvent::ReplacementApplied {
                     source_id: rid.source,
@@ -2673,12 +2701,13 @@ fn apply_single_replacement(
                 // (Swans of Bryn Argoll). Distinct from `post_replacement_source`,
                 // which is the replacement's own source (Swans itself).
                 if let Some(post) = mandatory_post_effect {
-                    if state.post_replacement_effect.is_none() {
-                        state.post_replacement_effect = Some(post);
-                        state.post_replacement_source = Some(rid.source);
-                        state.post_replacement_event_source = proposed_damage_source;
-                        state.post_replacement_event_target = proposed_damage_target.clone();
-                    }
+                    stash_post_replacement_effect(
+                        state,
+                        post,
+                        rid.source,
+                        proposed_damage_source,
+                        proposed_damage_target.clone(),
+                    );
                 }
                 events.push(GameEvent::ReplacementApplied {
                     source_id: rid.source,
@@ -2867,6 +2896,7 @@ pub fn continue_replacement(
             state.post_replacement_event_target = None;
         }
         state.post_replacement_effect = post_effect;
+        state.post_replacement_resolved_effect = None;
 
         return pipeline_loop(state, proposed, pending.depth + 1, &registry, events);
     }

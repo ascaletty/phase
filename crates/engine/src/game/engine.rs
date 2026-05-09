@@ -3526,17 +3526,18 @@ fn handle_play_land(
             // execute ability is non-modifier work (Choose, etc.). Without this,
             // the choice prompt would fire at a random later resolution point with
             // the wrong controller context.
-            if let Some(effect_def) = state.post_replacement_effect.take() {
+            if state.post_replacement_effect.is_some()
+                || state.post_replacement_resolved_effect.is_some()
+            {
                 state.post_replacement_source = None;
-                state.post_replacement_event_source = None;
-                state.post_replacement_event_target = None;
-                if let Some(next_waiting_for) = engine_replacement::apply_post_replacement_effect(
-                    state,
-                    &effect_def,
-                    Some(object_id),
-                    None,
-                    events,
-                ) {
+                if let Some(next_waiting_for) =
+                    engine_replacement::apply_pending_post_replacement_effect(
+                        state,
+                        Some(object_id),
+                        None,
+                        events,
+                    )
+                {
                     state.lands_played_this_turn += 1;
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {

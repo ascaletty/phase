@@ -7748,6 +7748,11 @@ pub struct ReplacementDefinition {
     pub event: ReplacementEvent,
     #[serde(default)]
     pub execute: Option<Box<AbilityDefinition>>,
+    /// CR 615.5: Runtime continuation captured while resolving an effect that
+    /// creates a replacement shield. Unlike `execute`, this preserves selected
+    /// targets and other resolution-time context for the delayed follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_execute: Option<Box<ResolvedAbility>>,
     #[serde(default)]
     pub mode: ReplacementMode,
     #[serde(default)]
@@ -7854,6 +7859,7 @@ impl ReplacementDefinition {
         Self {
             event,
             execute: None,
+            runtime_execute: None,
             mode: ReplacementMode::Mandatory,
             valid_card: None,
             description: None,
@@ -7880,6 +7886,11 @@ impl ReplacementDefinition {
 
     pub fn execute(mut self, ability: AbilityDefinition) -> Self {
         self.execute = Some(Box::new(ability));
+        self
+    }
+
+    pub fn runtime_execute(mut self, ability: ResolvedAbility) -> Self {
+        self.runtime_execute = Some(Box::new(ability));
         self
     }
 

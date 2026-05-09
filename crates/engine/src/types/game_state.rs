@@ -2547,6 +2547,10 @@ pub struct GameState {
     /// Set by `continue_replacement` for Optional replacements, consumed by the caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_effect: Option<Box<crate::types::ability::AbilityDefinition>>,
+    /// Transient resolved continuation for runtime-created replacement shields.
+    /// This preserves selected targets for CR 615.5 prevention follow-ups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_replacement_resolved_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
 
     /// CR 615.5: Source object of the replacement that stashed
     /// `post_replacement_effect`. Used by prevention follow-ups (e.g. Phyrexian
@@ -3285,6 +3289,7 @@ impl GameState {
             priority_pass_count: 0,
             pending_replacement: None,
             post_replacement_effect: None,
+            post_replacement_resolved_effect: None,
             post_replacement_source: None,
             post_replacement_event_source: None,
             post_replacement_event_target: None,

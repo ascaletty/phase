@@ -170,22 +170,17 @@ pub(crate) fn apply_damage_to_target(
             // takes place "immediately afterward" as the rule requires. The
             // applier already stamped `state.last_effect_count` with the
             // prevented amount so `EventContextAmount` resolves correctly.
-            if let Some(effect_def) = state.post_replacement_effect.take() {
-                let source = state.post_replacement_source.take();
+            if state.post_replacement_effect.is_some()
+                || state.post_replacement_resolved_effect.is_some()
+            {
                 // CR 615.5 + CR 609.7: leave `post_replacement_event_source`
                 // populated for the call so `TargetFilter::PostReplacementSourceController`
                 // can resolve against the prevented event's damage source. Clear
                 // after the call to prevent leakage into unrelated later
                 // replacements.
-                let _ = crate::game::engine_replacement::apply_post_replacement_effect(
-                    state,
-                    &effect_def,
-                    source,
-                    None,
-                    events,
+                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    state, None, None, events,
                 );
-                state.post_replacement_event_source = None;
-                state.post_replacement_event_target = None;
             }
             Ok(DamageResult::Applied(0))
         }

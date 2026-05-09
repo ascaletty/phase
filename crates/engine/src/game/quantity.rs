@@ -1196,6 +1196,16 @@ fn resolve_ref(
                             obj.controller == scoped_player_or_controller(ability, controller)
                         }
                         ControllerRef::TargetPlayer => target_player == Some(obj.controller),
+                        ControllerRef::ParentTargetController => ability
+                            .and_then(|ability| {
+                                ability.targets.iter().find_map(|target| match target {
+                                    TargetRef::Object(id) => {
+                                        state.objects.get(id).map(|obj| obj.controller)
+                                    }
+                                    TargetRef::Player(player) => Some(*player),
+                                })
+                            })
+                            .is_some_and(|player| player == obj.controller),
                         ControllerRef::DefendingPlayer => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == obj.controller)
@@ -1494,6 +1504,16 @@ fn resolve_ref(
                                 })
                             })
                             .is_some_and(|pid| pid == snap.controller),
+                        Some(ControllerRef::ParentTargetController) => ability
+                            .and_then(|a| {
+                                a.targets.iter().find_map(|t| match t {
+                                    TargetRef::Object(id) => {
+                                        state.objects.get(id).map(|obj| obj.controller)
+                                    }
+                                    TargetRef::Player(pid) => Some(*pid),
+                                })
+                            })
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::DefendingPlayer) => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
@@ -1531,6 +1551,14 @@ fn damage_source_controller_matches(
                 ability.targets.iter().find_map(|target| match target {
                     TargetRef::Player(player) => Some(*player),
                     TargetRef::Object(_) => None,
+                })
+            })
+            .is_some_and(|player| actual == player),
+        ControllerRef::ParentTargetController => ability
+            .and_then(|ability| {
+                ability.targets.iter().find_map(|target| match target {
+                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                    TargetRef::Player(player) => Some(*player),
                 })
             })
             .is_some_and(|player| actual == player),

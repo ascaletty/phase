@@ -789,6 +789,18 @@ pub(super) fn parse_subject_application(
         // structural check that the remaining tail is `<noun>'s controller` /
         // `<noun>'s owner`, mirroring the existing `parse_target` path that uses
         // `find("'s controller")` for the same purpose.
+        if after_det.ends_with("'s controller may") // allow-noncombinator: post-tokenized subject suffix classification
+            || after_det.ends_with("'s owner may")
+        // allow-noncombinator: post-tokenized subject suffix classification
+        {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTargetController,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: true,
+            });
+        }
         if after_det.ends_with("'s controller") || after_det.ends_with("'s owner") {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTargetController,

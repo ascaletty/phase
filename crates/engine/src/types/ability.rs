@@ -1301,6 +1301,10 @@ pub enum ControllerRef {
     /// surfaces a companion `TargetFilter::Player` slot so the player is chosen
     /// as part of CR 601.2c / CR 603.3d target declaration.
     TargetPlayer,
+    /// CR 608.2c + CR 109.4: Filter controller is the controller of the parent
+    /// object target inherited by this chained effect ("that permanent's
+    /// controller may sacrifice a land").
+    ParentTargetController,
     /// CR 508.1b + CR 603.4: Filter controller is the defending player for the
     /// source attacking creature in the current combat. Used by intervening-if
     /// quantity checks such as "defending player controls more lands than you."

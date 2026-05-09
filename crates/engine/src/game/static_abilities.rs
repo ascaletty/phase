@@ -734,6 +734,7 @@ pub(crate) fn static_filter_matches(
                         // parser never emits this variant for static filters.
                         crate::types::ability::ControllerRef::ScopedPlayer => false,
                         crate::types::ability::ControllerRef::TargetPlayer => false,
+                        crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
                     };
                 }

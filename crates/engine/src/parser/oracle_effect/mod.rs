@@ -5448,10 +5448,12 @@ fn has_anaphoric_reference(lower: &str) -> bool {
 /// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 fn replace_target_with_parent(effect: &mut Effect) {
     match effect {
+        Effect::Sacrifice { target, .. }
+            if target_filter_controller_ref(target)
+                == Some(ControllerRef::ParentTargetController) => {}
         Effect::Tap { target }
         | Effect::Untap { target }
         | Effect::Destroy { target, .. }
-        | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
@@ -5911,6 +5913,11 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
     match filter {
         TargetFilter::ScopedPlayer => Some(ControllerRef::ScopedPlayer),
         TargetFilter::TriggeringPlayer => Some(ControllerRef::ScopedPlayer),
+        TargetFilter::ParentTargetController => Some(ControllerRef::ParentTargetController),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(player_filter_as_controller_ref)
+        }
+        TargetFilter::Not { filter } => player_filter_as_controller_ref(filter),
         TargetFilter::Typed(tf)
             if tf.type_filters.is_empty()
                 && tf.controller.is_some()
@@ -5918,6 +5925,17 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         {
             tf.controller.clone()
         }
+        _ => None,
+    }
+}
+
+fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.clone(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(target_filter_controller_ref)
+        }
+        TargetFilter::Not { filter } => target_filter_controller_ref(filter),
         _ => None,
     }
 }
@@ -20458,6 +20476,35 @@ mod tests {
         assert!(def.optional);
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
         assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+    }
+
+    #[test]
+    fn parent_controller_may_sacrifice_if_player_does_gates_copy() {
+        let def = parse_effect_chain(
+            "return target nonland permanent to its owner's hand. Then that permanent's controller may sacrifice a land of their choice. If the player does, they may copy this spell and may choose a new target for that copy",
+            AbilityKind::Spell,
+        );
+        let sacrifice = def
+            .sub_ability
+            .as_ref()
+            .expect("bounce should chain to optional sacrifice");
+        assert!(sacrifice.optional);
+        match &*sacrifice.effect {
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(tf),
+                ..
+            } => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::ParentTargetController));
+            }
+            other => panic!("expected Sacrifice land, got {other:?}"),
+        }
+        let copy = sacrifice
+            .sub_ability
+            .as_ref()
+            .expect("sacrifice should chain to copy spell");
+        assert_eq!(copy.condition, Some(AbilityCondition::IfYouDo));
+        assert!(matches!(*copy.effect, Effect::CopySpell { .. }));
     }
 
     /// CR 608.2d + CR 603.2: "each opponent may X" — each opponent independently

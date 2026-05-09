@@ -1639,6 +1639,7 @@ fn evaluate_replacement_condition(
                 // replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
             };
@@ -1664,6 +1665,7 @@ fn evaluate_replacement_condition(
                 // replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
             };
@@ -1761,6 +1763,7 @@ fn evaluate_replacement_condition(
                 ControllerRef::Opponent => event_source_controller != controller,
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
+                | ControllerRef::ParentTargetController
                 | ControllerRef::DefendingPlayer => false,
             }
         }
@@ -1992,6 +1995,9 @@ pub fn find_applicable_replacements(
                                 // closed — parser never emits this variant here.
                                 crate::types::ability::ControllerRef::ScopedPlayer => false,
                                 crate::types::ability::ControllerRef::TargetPlayer => false,
+                                crate::types::ability::ControllerRef::ParentTargetController => {
+                                    false
+                                }
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
                             };
                             if !matches {
@@ -2016,6 +2022,9 @@ pub fn find_applicable_replacements(
                             // replacement-application time. Fail closed.
                             Some(crate::types::ability::ControllerRef::ScopedPlayer) => false,
                             Some(crate::types::ability::ControllerRef::TargetPlayer) => false,
+                            Some(crate::types::ability::ControllerRef::ParentTargetController) => {
+                                false
+                            }
                             Some(crate::types::ability::ControllerRef::DefendingPlayer) => false,
                             None => {
                                 // Default: controller-only (backward compatible)

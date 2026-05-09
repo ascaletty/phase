@@ -155,6 +155,17 @@ pub(crate) fn effect_object_targets(
     }
 }
 
+pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.clone(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(target_filter_controller_scope)
+        }
+        TargetFilter::Not { filter } => target_filter_controller_scope(filter),
+        _ => None,
+    }
+}
+
 fn matches_player_scope(
     state: &GameState,
     player: PlayerId,
@@ -1039,6 +1050,17 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         {
             return player;
+        }
+    }
+    if let Effect::Sacrifice { target, .. } = &ability.effect {
+        if target_filter_controller_scope(target) == Some(ControllerRef::ParentTargetController) {
+            if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
+                state,
+                ability,
+                &TargetFilter::ParentTargetController,
+            ) {
+                return player;
+            }
         }
     }
 

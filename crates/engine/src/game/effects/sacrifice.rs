@@ -50,6 +50,15 @@ fn resolve_sacrifice_scope(
             })
             .map(|pid| vec![pid])
             .unwrap_or_default(),
+        Some(ControllerRef::ParentTargetController) => {
+            crate::game::targeting::resolve_effect_player_ref(
+                state,
+                ability,
+                &TargetFilter::ParentTargetController,
+            )
+            .map(|pid| vec![pid])
+            .unwrap_or_default()
+        }
         Some(ControllerRef::DefendingPlayer) => {
             crate::game::combat::defending_player_for_attacker(state, ability.source_id)
                 .map(|pid| vec![pid])
@@ -59,10 +68,7 @@ fn resolve_sacrifice_scope(
 }
 
 fn sacrifice_controller_scope(filter: &TargetFilter) -> Option<ControllerRef> {
-    match filter {
-        TargetFilter::Typed(t) => t.controller.clone(),
-        _ => None,
-    }
+    crate::game::effects::target_filter_controller_scope(filter)
 }
 
 fn trigger_event_scoped_player(state: &GameState, ability: &ResolvedAbility) -> Option<PlayerId> {
@@ -117,7 +123,14 @@ pub fn resolve(
     };
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
 
-    let targeted_objects = crate::game::effects::effect_object_targets(filter, &ability.targets);
+    let targeted_objects = if matches!(
+        sacrifice_controller_scope(filter),
+        Some(ControllerRef::ParentTargetController)
+    ) {
+        Vec::new()
+    } else {
+        crate::game::effects::effect_object_targets(filter, &ability.targets)
+    };
 
     if targeted_objects.is_empty() {
         // CR 701.16a: Derive the player(s) whose permanents are in scope from
@@ -523,6 +536,72 @@ mod tests {
             WaitingFor::EffectZoneChoice { player, cards, .. } => {
                 assert_eq!(*player, PlayerId(1));
                 assert!(cards.contains(&tp_a) && cards.contains(&tp_b));
+                assert_eq!(cards.len(), 2);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parent_target_controller_scope_routes_choice_to_parent_controller() {
+        let mut state = GameState::new_two_player(42);
+        let parent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Target Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let _own_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Own Land".to_string(),
+            Zone::Battlefield,
+        );
+        let their_land_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Their Land A".to_string(),
+            Zone::Battlefield,
+        );
+        let their_land_b = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Their Land B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [_own_land, their_land_a, their_land_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .expect("test land exists")
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::land()
+                        .controller(ControllerRef::ParentTargetController),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![TargetRef::Object(parent)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(cards.contains(&their_land_a) && cards.contains(&their_land_b));
                 assert_eq!(cards.len(), 2);
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),

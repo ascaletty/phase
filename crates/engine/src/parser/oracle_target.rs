@@ -148,6 +148,13 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         }
     }
 
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("random ").parse(lower.as_str()) {
+        if tag::<_, _, OracleError<'_>>("target ").parse(rest).is_ok() {
+            let original_rest = &text[lower.len() - rest.len()..];
+            return parse_target_with_ctx(original_rest, ctx);
+        }
+    }
+
     // Quantified target phrases routed here from callers that only need the filter,
     // not the target-count metadata.
     static QUANTIFIED_PREFIXES: &[&str] = &[
@@ -3783,6 +3790,13 @@ mod tests {
     fn target_creature() {
         let (f, _) = parse_target("target creature");
         assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
+    }
+
+    #[test]
+    fn random_target_creature_strips_random_modifier() {
+        let (f, rest) = parse_target("random target creatures");
+        assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
+        assert_eq!(rest, "");
     }
 
     #[test]

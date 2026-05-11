@@ -1783,23 +1783,39 @@ pub fn synthesize_modular(face: &mut CardFace) {
         return;
     }
 
-    // ETB-with-counters replacement: idempotency-shape match on the synthesized
-    // Moved → PutCounter(SelfRef, P1P1, Fixed) replacement. Distinct from
-    // Walking Ballista's `count: CostXPaid` variant — Modular always uses
-    // `Fixed(n)`.
-    let existing_etb: usize = face
-        .replacements
-        .iter()
-        .filter(|r| is_modular_etb_replacement(r))
-        .count();
+    // ETB-with-counters replacement: per-N idempotency match on the synthesized
+    // Moved → PutCounter(SelfRef, P1P1, Fixed(N)) replacement. The predicate is
+    // narrowed to the exact N so a card that carries both a printed "enters
+    // with K +1/+1 counters" replacement AND `Keyword::Modular(N)` with K≠N
+    // can't silently dedupe — each Modular instance only counts an existing
+    // ETB replacement as covered when its `Fixed` value equals that instance's
+    // N. Walking Ballista's `count: CostXPaid` variant fails the `Fixed { .. }`
+    // pattern regardless and never collides.
+    //
+    // Dies-transfer is shape-only because the execute body has no N dependence
+    // (count is the LKI-counted runtime quantity, identical across all
+    // instances on a single face).
     let existing_dies: usize = face
         .triggers
         .iter()
         .filter(|t| is_modular_dies_transfer_trigger(t))
         .count();
 
-    // Per CR 702.43b: each Modular instance emits its own ETB + dies pair.
-    for &n in modular_values.iter().skip(existing_etb) {
+    // Per CR 702.43b + CR 113.2c: each Modular instance emits its own ETB
+    // replacement. To survive re-running synthesis idempotently, count
+    // existing same-N replacements and emit only the delta — `Modular(2)`
+    // twice on a face needs two `Fixed(2)` replacements; running synthesis
+    // again must not add a third.
+    for &n in &modular_values {
+        let needed = modular_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
         let etb_counters = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
@@ -1861,7 +1877,7 @@ pub fn synthesize_modular(face: &mut CardFace) {
             .valid_card(TargetFilter::SelfRef)
             .execute(transfer)
             .description(
-                "CR 702.43a: Modular — when this permanent dies, you may put a +1/+1 counter on target artifact creature for each +1/+1 counter on it."
+                "CR 702.43a: Modular — when this creature dies, you may put a +1/+1 counter on target artifact creature for each +1/+1 counter on it."
                     .to_string(),
             );
         face.triggers.push(trigger);
@@ -1870,9 +1886,16 @@ pub fn synthesize_modular(face: &mut CardFace) {
 
 /// Idempotency-shape predicate for `synthesize_modular`'s ETB-with-counters
 /// replacement. True iff `replacement` is a `Moved` replacement on `SelfRef`
-/// whose execute body is `Effect::PutCounter` placing P1P1 counters on
-/// `SelfRef` with a fixed count.
-fn is_modular_etb_replacement(replacement: &ReplacementDefinition) -> bool {
+/// whose execute body is `Effect::PutCounter` placing exactly `expected_n`
+/// P1P1 counters on `SelfRef` with a fixed count.
+///
+/// The `expected_n` argument is load-bearing: a card carrying both a parsed
+/// "enters with K +1/+1 counters" replacement AND `Keyword::Modular(N)` with
+/// K ≠ N must NOT silently dedupe — the K replacement is not a Modular-N
+/// replacement and the synthesizer must still emit Fixed(N). Matching by
+/// shape alone (any `Fixed { value }`) would treat K as covering N and skip
+/// the emit, leaving the card with the wrong ETB count.
+fn is_modular_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
     if !matches!(replacement.event, ReplacementEvent::Moved)
         || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
     {
@@ -1885,9 +1908,9 @@ fn is_modular_etb_replacement(replacement: &ReplacementDefinition) -> bool {
         &*execute.effect,
         Effect::PutCounter {
             counter_type,
-            count: QuantityExpr::Fixed { .. },
+            count: QuantityExpr::Fixed { value },
             target: TargetFilter::SelfRef,
-        } if counter_type == "P1P1"
+        } if counter_type == "P1P1" && *value == expected_n as i32
     )
 }
 
@@ -6355,7 +6378,7 @@ mod modular_synthesis_tests {
         let replacement = face
             .replacements
             .iter()
-            .find(|r| is_modular_etb_replacement(r))
+            .find(|r| is_modular_etb_replacement(r, 2))
             .expect("modular should synthesize an ETB-with-counters replacement");
 
         assert!(matches!(replacement.event, ReplacementEvent::Moved));
@@ -6460,7 +6483,7 @@ mod modular_synthesis_tests {
         assert_eq!(
             face.replacements
                 .iter()
-                .filter(|r| is_modular_etb_replacement(r))
+                .filter(|r| is_modular_etb_replacement(r, 2))
                 .count(),
             1,
             "ETB replacement should be deduped"
@@ -6496,10 +6519,26 @@ mod modular_synthesis_tests {
         face.keywords.push(Keyword::Modular(3));
         synthesize_modular(&mut face);
 
+        // CR 113.2c: each instance emits its own ETB replacement; the
+        // predicate is per-N so we filter by either N to find the matching
+        // instance's emission.
+        let replacement_n1 = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 1))
+            .count();
+        let replacement_n3 = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 3))
+            .count();
+        assert_eq!(replacement_n1, 1, "exactly one Fixed(1) ETB replacement");
+        assert_eq!(replacement_n3, 1, "exactly one Fixed(3) ETB replacement");
+
         let replacements: Vec<_> = face
             .replacements
             .iter()
-            .filter(|r| is_modular_etb_replacement(r))
+            .filter(|r| is_modular_etb_replacement(r, 1) || is_modular_etb_replacement(r, 3))
             .collect();
         assert_eq!(replacements.len(), 2);
 
@@ -6572,6 +6611,54 @@ mod modular_synthesis_tests {
              Modular idempotency check"
         );
     }
+
+    /// CR 614.1c regression guard: a face that already carries a parsed
+    /// "enters with K +1/+1 counters" ETB replacement with K ≠ N MUST still
+    /// receive a synthesized Fixed(N) replacement. The per-N predicate
+    /// prevents the K-replacement from silently pre-satisfying the Modular-N
+    /// idempotency check (and the resulting card from entering with the
+    /// wrong counter count). No printed card carries both today, but the
+    /// safety is one line of code and pins the predicate semantics.
+    #[test]
+    fn synthesize_modular_does_not_dedupe_unrelated_etb_counter_replacement() {
+        let mut face = face_with_modular(2);
+
+        // Pre-existing K=3 ETB replacement (as if a parser had emitted one
+        // for a printed "this permanent enters with 3 +1/+1 counters on it"
+        // clause). Shape matches Modular's emission except for the count.
+        let unrelated_etb = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: "P1P1".to_string(),
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some("Pre-existing K=3 ETB replacement".to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(unrelated_etb);
+
+        synthesize_modular(&mut face);
+
+        // Both replacements must coexist: the unrelated Fixed(3) and the
+        // synthesized Fixed(2).
+        let fixed2 = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 2))
+            .count();
+        let fixed3 = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 3))
+            .count();
+        assert_eq!(fixed2, 1, "Fixed(2) Modular ETB must still be emitted");
+        assert_eq!(fixed3, 1, "Pre-existing Fixed(3) replacement preserved");
+    }
 }
 
 #[cfg(test)]
@@ -6636,11 +6723,91 @@ mod modular_runtime_tests {
         state
     }
 
-    /// Spawn an Arcbound creature into the battlefield via `create_object` +
-    /// `apply_card_face_to_object`, then fire the synthetic
-    /// `Moved`-to-battlefield event so the ETB replacement places the initial
-    /// N +1/+1 counters.
-    fn spawn_arcbound(state: &mut GameState, face: &CardFace, controller: PlayerId) -> ObjectId {
+    /// Spawn an Arcbound creature in the Hand, then drive a real
+    /// `ProposedEvent::ZoneChange { from: Hand, to: Battlefield }` through
+    /// the engine replacement pipeline. The synthesized
+    /// `ReplacementEvent::Moved` is absorbed by the pipeline into
+    /// `enter_with_counters`, which `apply_etb_counters` then applies via
+    /// `add_counter_with_replacement` — going through the same path
+    /// `ReplacementEvent::AddCounter` modifiers (e.g., Hardened Scales) hook
+    /// into. This exercises the full ETB-with-counters wiring end-to-end.
+    fn spawn_arcbound_via_etb_pipeline(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let next_card = CardId(state.next_object_id);
+        // Place the object in Hand first so the proposed Hand→Battlefield
+        // ZoneChange routes through the replacement pipeline.
+        let obj_id = create_object(state, next_card, controller, face.name.clone(), Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            obj_id,
+            Zone::Hand,
+            Zone::Battlefield,
+            None,
+        );
+        let mut events = Vec::new();
+        let result = crate::game::replacement::replace_event(state, proposed, &mut events);
+        let crate::game::replacement::ReplacementResult::Execute(event) = result else {
+            panic!(
+                "Arcbound ETB replacement is Mandatory — pipeline must execute directly, got {result:?}"
+            );
+        };
+        let crate::types::proposed_event::ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            enter_with_counters,
+            ..
+        } = event
+        else {
+            panic!("pipeline must yield a ZoneChange execute event");
+        };
+        move_to_zone(state, object_id, to, &mut events);
+        // CR 614.1c: Apply the counters the Moved replacement absorbed into
+        // `enter_with_counters`. Each entry routes through
+        // `add_counter_with_replacement` (the public single-authority counter
+        // entry point) so Hardened-Scales-class AddCounter modifiers
+        // (CR 614.1a) layer on. Mirrors the loop in
+        // `engine_replacement::apply_etb_counters`, which is `pub(super)`
+        // and not reachable from the database module — re-implementing the
+        // public-API loop here is cleaner than widening visibility for one
+        // test consumer.
+        let actor = state
+            .objects
+            .get(&object_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(controller);
+        for (counter_type_str, count) in &enter_with_counters {
+            let ct = crate::types::counter::parse_counter_type(counter_type_str);
+            crate::game::effects::counters::add_counter_with_replacement(
+                state,
+                actor,
+                object_id,
+                ct,
+                *count,
+                &mut events,
+            );
+        }
+        obj_id
+    }
+
+    /// Place an Arcbound creature directly on the battlefield with N P1P1
+    /// counters pre-installed, bypassing the ETB replacement pipeline. Used
+    /// by dies-trigger tests that isolate LKI counter-snapshot semantics —
+    /// the ETB path is exercised separately by
+    /// `spawn_arcbound_via_etb_pipeline`. The "with_counters" suffix is
+    /// load-bearing: callers must read this as a post-ETB shortcut, NOT as
+    /// a pipeline-driving helper.
+    fn place_arcbound_on_battlefield_with_counters(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+    ) -> ObjectId {
         let next_card = CardId(state.next_object_id);
         let obj_id = create_object(
             state,
@@ -6653,11 +6820,9 @@ mod modular_runtime_tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             apply_card_face_to_object(obj, face);
         }
-        // Synthesize the ETB by directly placing N counters on the freshly
-        // spawned object. The Moved replacement wiring exercises the same
-        // resolution path through the casting pipeline; for this unit-level
-        // runtime test we set the post-replacement state directly so the
-        // dies-trigger test isolates LKI-counted transfer semantics.
+        // Manually install the N counters the (skipped) ETB pipeline would
+        // have placed — matches the post-replacement state the dies trigger
+        // sees in real games.
         if let Some(Keyword::Modular(n)) = face
             .keywords
             .iter()
@@ -6673,19 +6838,53 @@ mod modular_runtime_tests {
         obj_id
     }
 
-    /// CR 702.43a clause 1 runtime: an Arcbound creature with `Modular(2)`
-    /// enters with exactly 2 +1/+1 counters on it.
+    /// CR 702.43a clause 1 + CR 614.1c runtime: a real Hand→Battlefield
+    /// ZoneChange routed through `replace_event` triggers the synthesized
+    /// `ReplacementEvent::Moved`, which absorbs the `Effect::PutCounter`
+    /// execute body into `enter_with_counters` on the ZoneChange event. The
+    /// caller (`spawn_arcbound_via_etb_pipeline`) then calls `move_to_zone`
+    /// followed by `add_counter_with_replacement` per absorbed counter,
+    /// mirroring the dispatch path
+    /// `engine_replacement::handle_replacement_choice` and `stack::resolve_top`
+    /// use for spell-cast and choice-resume entries. After the pipeline
+    /// settles, the object has exactly N P1P1 counters — proving the
+    /// synthesized replacement integrates with the engine, not just that
+    /// shape inspection matches the synthesizer's emit.
     #[test]
-    fn modular_etb_replacement_starts_object_with_n_p1p1_counters() {
+    fn modular_etb_via_pipeline_places_n_p1p1_counters() {
         let face = arcbound_face("Arcbound Crusher", 2, 5);
 
-        // Verify the synthesized replacement is present and would place 2
-        // counters; this is the contract between the replacement pipeline
-        // and the runtime.
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let obj_id = spawn_arcbound_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        // After the pipeline executes the Moved replacement and apply_etb_counters
+        // runs, the object is on the battlefield with 2 P1P1 counters.
+        let obj = state.objects.get(&obj_id).expect("object exists");
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "object must reach battlefield after pipeline"
+        );
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 2,
+            "the synthesized ETB replacement routed through replace_event \
+             must place exactly Modular N (=2) +1/+1 counters"
+        );
+    }
+
+    /// Shape-only check (decoupled from the pipeline test above): the
+    /// synthesized replacement's execute body carries `Fixed(N)` so it can
+    /// be absorbed by the Moved-event applier as ETB counters. Distinct from
+    /// the synthesis_tests module's shape test in that it asserts against
+    /// the post-`synthesize_all` face that an Arcbound Crusher would carry.
+    #[test]
+    fn arcbound_face_carries_fixed_n_etb_replacement() {
+        let face = arcbound_face("Arcbound Crusher", 2, 5);
         let replacement = face
             .replacements
             .iter()
-            .find(|r| is_modular_etb_replacement(r))
+            .find(|r| is_modular_etb_replacement(r, 2))
             .expect("Arcbound Crusher should have the synthesized ETB replacement");
         let execute = replacement.execute.as_deref().unwrap();
         let Effect::PutCounter {
@@ -6696,21 +6895,6 @@ mod modular_runtime_tests {
             panic!("ETB execute should be PutCounter with a fixed count");
         };
         assert_eq!(*value, 2, "Modular 2 places 2 counters on ETB");
-
-        // Confirm `spawn_arcbound` honors that contract for downstream tests.
-        let mut state = setup_state_with_priority(PlayerId(0));
-        let obj_id = spawn_arcbound(&mut state, &face, PlayerId(0));
-        let p1p1 = *state
-            .objects
-            .get(&obj_id)
-            .unwrap()
-            .counters
-            .get(&CounterType::Plus1Plus1)
-            .unwrap_or(&0);
-        assert_eq!(
-            p1p1, 2,
-            "Arcbound Crusher should enter with 2 +1/+1 counters"
-        );
     }
 
     /// CR 702.43a clause 2 happy path: a dying Arcbound creature with K
@@ -6722,7 +6906,8 @@ mod modular_runtime_tests {
         let target_face = plain_artifact_creature_face("Steel Walker");
 
         let mut state = setup_state_with_priority(PlayerId(0));
-        let arcbound_id = spawn_arcbound(&mut state, &arcbound, PlayerId(0));
+        let arcbound_id =
+            place_arcbound_on_battlefield_with_counters(&mut state, &arcbound, PlayerId(0));
 
         let target_card = CardId(state.next_object_id);
         let target_id = create_object(
@@ -6773,21 +6958,31 @@ mod modular_runtime_tests {
         );
     }
 
-    /// CR 702.43a clause 2 + CR 400.7: the transfer count reads from LKI, so a
-    /// creature that died with MORE counters than its printed Modular N (e.g.,
-    /// after Hardened Scales doubling) transfers the modified post-ETB count.
-    /// Simulates Hardened Scales by manually setting `counters` to N+1 before
-    /// death.
+    /// CR 702.43a clause 2 + CR 400.7 + CR 122.2: the transfer count reads
+    /// from LKI, so a creature that died with MORE counters than its printed
+    /// Modular N transfers the modified post-ETB count — whatever counter
+    /// total the LKI snapshot captured at zone exit. The test mutates
+    /// `obj.counters` directly to a non-N value before death so the LKI
+    /// snapshot pre-exit deviates from `Modular(N)`; this isolates the LKI
+    /// look-back wiring (`resolve_counters_on_scope::Source` zone-keyed
+    /// fallback) from any specific counter-modifier replacement effect.
+    ///
+    /// The "extra counters acquired post-ETB" framing is honest: the test
+    /// proves "LKI captures whatever counter count was on the object at
+    /// death," NOT "Hardened Scales doubles Modular ETB end-to-end." The
+    /// latter is exercised separately by `hardened_scales_doubles_modular_etb`
+    /// below.
     #[test]
-    fn modular_dies_transfers_modified_counter_count_after_hardened_scales() {
+    fn modular_dies_transfers_extra_counters_acquired_post_etb() {
         let arcbound = arcbound_face("Arcbound Worker", 1, 1);
         let target_face = plain_artifact_creature_face("Steel Walker");
 
         let mut state = setup_state_with_priority(PlayerId(0));
-        let arcbound_id = spawn_arcbound(&mut state, &arcbound, PlayerId(0));
-        // Simulate Hardened Scales: Arcbound Worker ETB'd with 1 counter; an
-        // additional counter was added by another source mid-life. LKI must
-        // capture the modified total (2), not the printed Modular N (1).
+        let arcbound_id =
+            place_arcbound_on_battlefield_with_counters(&mut state, &arcbound, PlayerId(0));
+        // Direct mutation: simulate "Arcbound Worker ETB'd with 1 counter;
+        // an additional counter was added by another source mid-life." LKI
+        // must capture the modified total (2), not the printed Modular N (1).
         state
             .objects
             .get_mut(&arcbound_id)
@@ -6829,6 +7024,120 @@ mod modular_runtime_tests {
         );
     }
 
+    /// CR 702.43a + CR 614.1a + CR 614.1c real Hardened Scales end-to-end:
+    /// install an `AddCounter` modifier (`QuantityModification::Plus { 1 }`,
+    /// scoped to P1P1 counters via `CounterMatch::OfType(Plus1Plus1)`) on a
+    /// separate battlefield object, then drive a Modular N=1 Arcbound Worker
+    /// through the ETB pipeline. The flow:
+    ///
+    ///   1. `replace_event(ZoneChange { Hand → Battlefield })` matches the
+    ///      synthesized Modular `Moved` replacement, absorbing
+    ///      `Effect::PutCounter { Fixed(1), SelfRef }` into the ZoneChange's
+    ///      `enter_with_counters = [("P1P1", 1)]`.
+    ///   2. `apply_etb_counters` → `add_counter_with_replacement` proposes
+    ///      `ProposedEvent::AddCounter { count: 1 }`, which goes through the
+    ///      pipeline a second time. Hardened Scales matches via
+    ///      `AddCounter`+`Plus1Plus1`, modifies count → 2.
+    ///   3. The modified AddCounter applies, placing 2 P1P1 counters.
+    ///   4. Killing the creature now snapshots `{P1P1: 2}` into LKI.
+    ///   5. The dies-trigger transfers the LKI-counted 2 to the target.
+    ///
+    /// Proves both halves of the Modular wiring (CR 614.1c absorption + CR
+    /// 122.1 LKI-counted transfer) compose correctly with a real CR 614.1a
+    /// AddCounter modifier — exactly what Hardened Scales + Arcbound Worker
+    /// does in a real game.
+    #[test]
+    fn hardened_scales_doubles_modular_etb_and_dies_transfer() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterMatch;
+
+        let arcbound = arcbound_face("Arcbound Worker", 1, 1);
+        let target_face = plain_artifact_creature_face("Steel Walker");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+
+        // Install Hardened Scales as a battlefield object with an
+        // `AddCounter` quantity modifier filtered to P1P1 counters. The
+        // pipeline matches the modifier when the proposed AddCounter event's
+        // counter type matches the `CounterMatch` filter.
+        let hs_card = CardId(state.next_object_id);
+        let hs_id = create_object(
+            &mut state,
+            hs_card,
+            PlayerId(0),
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let hs_obj = state.objects.get_mut(&hs_id).unwrap();
+            hs_obj.card_types.core_types.push(CoreType::Enchantment);
+            hs_obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Plus { value: 1 })
+                    .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1))
+                    .description("Hardened Scales".to_string()),
+            );
+        }
+
+        // Drive the Modular ETB through the full pipeline. The Moved
+        // replacement absorbs Fixed(1) into enter_with_counters; the inner
+        // AddCounter event is then modified by Hardened Scales → count=2.
+        let arcbound_id = spawn_arcbound_via_etb_pipeline(&mut state, &arcbound, PlayerId(0));
+        let etb_counters = *state
+            .objects
+            .get(&arcbound_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            etb_counters, 2,
+            "Hardened Scales must add +1 to the Modular N=1 ETB: 1 + 1 = 2"
+        );
+
+        // Stand up the transfer target.
+        let target_card = CardId(state.next_object_id);
+        let target_id = create_object(
+            &mut state,
+            target_card,
+            PlayerId(0),
+            target_face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target_id).unwrap();
+            apply_card_face_to_object(obj, &target_face);
+        }
+
+        // Kill the Arcbound Worker. LKI captures {P1P1: 2}.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, arcbound_id, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+        drive_optional_then_select_target(&mut state, target_id);
+
+        // The transfer reads LKI = 2 and places 2 counters on the target.
+        // Hardened Scales matches the inner AddCounter event again (it's a
+        // P1P1 add) and adds another +1, so the target ends up with 3.
+        // CR 614.5 prevents a replacement from re-applying to its own
+        // already-replaced event, but Modular's transfer is a NEW AddCounter
+        // event (not the same instance), so Hardened Scales fires on it too.
+        let target_p1p1 = *state
+            .objects
+            .get(&target_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            target_p1p1, 3,
+            "transfer count from LKI (2) is itself modified by Hardened \
+             Scales on the transfer event: 2 + 1 = 3"
+        );
+    }
+
     /// CR 603.5: controller declines the optional "you may" — no counters
     /// transfer.
     #[test]
@@ -6837,7 +7146,8 @@ mod modular_runtime_tests {
         let target_face = plain_artifact_creature_face("Steel Walker");
 
         let mut state = setup_state_with_priority(PlayerId(0));
-        let arcbound_id = spawn_arcbound(&mut state, &arcbound, PlayerId(0));
+        let arcbound_id =
+            place_arcbound_on_battlefield_with_counters(&mut state, &arcbound, PlayerId(0));
 
         let target_card = CardId(state.next_object_id);
         let target_id = create_object(
@@ -6883,60 +7193,122 @@ mod modular_runtime_tests {
         );
     }
 
-    /// CR 702.43a + CR 115.1e + CR 115.2: an opponent's artifact creature is
-    /// a legal target — Modular's transfer is a targeted triggered ability
-    /// (CR 115.1e explicitly calls out Modular as a keyword that represents a
-    /// targeted ability) and the target filter doesn't restrict to "you
-    /// control", so any battlefield artifact creature qualifies. A
-    /// multiplayer Arcbound dies and the controller transfers counters to
-    /// the opponent's artifact creature.
+    /// CR 702.43a + CR 115.1e + CR 115.2 + CR 800: in a 3-player game, an
+    /// opponent-controlled artifact creature is a first-class legal target
+    /// for the Modular dies-transfer. The target filter is
+    /// `TypedFilter::creature().with_type(Artifact)` — no controller
+    /// restriction. P0 (the dying Modular's controller) has none of their
+    /// own artifact creatures; P1 has the artifact-creature target; P2 has
+    /// a plain (non-artifact) creature that the Artifact + Creature
+    /// conjunction filter must exclude. Auto-select binds P1's creature
+    /// (the unique legal target), proving:
+    ///   (a) opponent-controlled targets are not restricted away
+    ///   (b) the conjunction filter actually filters — P2's plain creature
+    ///       must NOT be considered a legal target
+    /// Mirrors the 3-player rigor of
+    /// `annihilator_in_multiplayer_targets_defending_player_not_all_opponents`.
     #[test]
-    fn modular_in_multiplayer_can_target_opponents_artifact_creature() {
+    fn modular_dies_in_3p_can_target_opponents_artifact_creature() {
         let arcbound = arcbound_face("Arcbound Stinger", 1, 1);
         let target_face = plain_artifact_creature_face("Opposing Walker");
 
-        let mut state = setup_state_with_priority(PlayerId(0));
-        let arcbound_id = spawn_arcbound(&mut state, &arcbound, PlayerId(0));
+        // CR 800.1: 3-player game.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
 
-        // Spawn target under PlayerId(1).
-        let target_card = CardId(state.next_object_id);
-        let target_id = create_object(
+        let arcbound_id =
+            place_arcbound_on_battlefield_with_counters(&mut state, &arcbound, PlayerId(0));
+
+        // P1 controls the artifact-creature target.
+        let p1_target_card = CardId(state.next_object_id);
+        let p1_target_id = create_object(
             &mut state,
-            target_card,
+            p1_target_card,
             PlayerId(1),
             target_face.name.clone(),
             Zone::Battlefield,
         );
         {
-            let obj = state.objects.get_mut(&target_id).unwrap();
+            let obj = state.objects.get_mut(&p1_target_id).unwrap();
             apply_card_face_to_object(obj, &target_face);
+        }
+
+        // P2 controls a plain (non-artifact) creature — an illegal target.
+        // Asserts the Artifact + Creature conjunction filter actually
+        // excludes non-artifact creatures rather than letting any creature
+        // through.
+        let p2_decoy_card = CardId(state.next_object_id);
+        let p2_decoy_id = create_object(
+            &mut state,
+            p2_decoy_card,
+            PlayerId(2),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&p2_decoy_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
         }
 
         let mut events = Vec::new();
         move_to_zone(&mut state, arcbound_id, Zone::Graveyard, &mut events);
         process_triggers(&mut state, &events);
 
+        // Exactly one legal target (P1's artifact creature) — auto-select
+        // binds it. P2's plain creature is excluded by the Artifact
+        // requirement on the target filter.
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. })),
+            "trigger with one legal target must auto-bind and push to stack"
+        );
+
         let mut resolve_events = Vec::new();
         resolve_top(&mut state, &mut resolve_events);
-        drive_optional_then_select_target(&mut state, target_id);
+        drive_optional_then_select_target(&mut state, p1_target_id);
 
-        let target_p1p1 = *state
+        let p1_p1p1 = *state
             .objects
-            .get(&target_id)
+            .get(&p1_target_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        let p2_p1p1 = *state
+            .objects
+            .get(&p2_decoy_id)
             .unwrap()
             .counters
             .get(&CounterType::Plus1Plus1)
             .unwrap_or(&0);
         assert_eq!(
-            target_p1p1, 1,
-            "opponent's artifact creature is a legal target and receives the transfer"
+            p1_p1p1, 1,
+            "the opponent-controlled artifact creature is a legal target \
+             and receives the transfer"
+        );
+        assert_eq!(
+            p2_p1p1, 0,
+            "the non-artifact creature is excluded by the Artifact + \
+             Creature conjunction filter"
         );
     }
 
     /// Driver: accept the optional `may` prompt. Targets are auto-selected at
     /// stack-push time (CR 603.3d) when the synthesized trigger has exactly
-    /// one legal target — every happy-path fixture here places a single
-    /// artifact creature on the battlefield, so the engine auto-binds it.
+    /// one legal target — every happy-path fixture here places exactly one
+    /// legal artifact-creature target on the battlefield, so the engine
+    /// auto-binds it (including the 3-player test, where P2's plain creature
+    /// is filtered out by the Artifact requirement).
     fn drive_optional_then_select_target(state: &mut GameState, _target_id: ObjectId) {
         assert!(
             matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),

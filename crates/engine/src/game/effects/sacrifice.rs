@@ -10,15 +10,17 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-/// CR 701.16a: Resolve the set of players whose permanents are eligible for a
-/// sacrifice effect, derived from the target filter's `ControllerRef`.
+/// Resolve the set of players whose permanents are eligible for a sacrifice
+/// effect, derived from the target filter's `ControllerRef`.
+///
+/// CR 701.21a: A player can only sacrifice a permanent they control.
 ///
 /// - `You` (or no controller clause): only the ability controller sacrifices
 ///   (the historical default).
 /// - `Opponent`: each player other than the ability controller may be asked to
-///   sacrifice. Per CR 701.16a, each affected player chooses their own
-///   permanent; this resolver handles the single-opponent two-player case by
-///   routing both filter scope and chooser to that opponent.
+///   sacrifice. Per CR 701.21a, each affected player can only sacrifice their
+///   own permanent; this resolver handles the single-opponent two-player case
+///   by routing both filter scope and chooser to that opponent.
 /// - `ScopedPlayer`: an event-context player such as the active player for
 ///   upkeep triggers.
 /// - `TargetPlayer`: the first `TargetRef::Player` in `ability.targets` —
@@ -86,13 +88,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.16a + CR 608.2c: Resolve the dynamic sacrifice count through
-    // `resolve_quantity_with_targets` so `player_scope` iteration and per-
-    // player refs (HandSize, ObjectCount{you-control}) resolve against the
-    // rebound controller. A missing Sacrifice effect falls back to 1 so the
+    // CR 609.3: Resolve the dynamic sacrifice count through
+    // `resolve_quantity_with_targets` before attempting the sacrifice so
+    // mandatory effects can do as much as possible against the rebound
+    // controller. A missing Sacrifice effect falls back to 1 so the
     // compatibility branch below preserves existing behavior.
-    // CR 701.21a + CR 608.2d: Peel `UpTo` from the count expression to derive
-    // the upper-bound expression and the may-pick-fewer flag. Plain
+    // Peel `UpTo` from the count expression to derive the upper-bound
+    // expression and the may-pick-fewer flag. Plain
     // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
     // wrapped in `UpTo` means the player may select 0..=count.
     let default_count = QuantityExpr::Fixed { value: 1 };
@@ -137,7 +139,7 @@ pub fn resolve(
     };
 
     if targeted_objects.is_empty() {
-        // CR 701.16a: Derive the player(s) whose permanents are in scope from
+        // CR 701.21a: Derive the player(s) whose permanents are in scope from
         // the target filter's ControllerRef. Defaults to `[ability.controller]`
         // when no controller clause is present (historical "you sacrifice"
         // default). For `Opponent` / `TargetPlayer`, each affected player is
@@ -194,10 +196,10 @@ pub fn resolve(
             return Ok(());
         }
 
-        // CR 701.16b: When the resolved count is at least the eligible pool
-        // and the sacrifice is mandatory, every eligible permanent is
-        // sacrificed — the player has no choice. Fast-path this rather than
-        // round-tripping through EffectZoneChoice.
+        // CR 701.21a + CR 609.3: When the resolved count is at least the
+        // eligible pool and the sacrifice is mandatory, sacrifice every
+        // eligible permanent — the effect does as much as possible. Fast-path
+        // this rather than round-tripping through EffectZoneChoice.
         if !up_to && eligible.len() <= count {
             let mut sacrificed: i32 = 0;
             for obj_id in eligible {
@@ -219,7 +221,7 @@ pub fn resolve(
             return Ok(());
         }
 
-        // CR 701.16a: "Sacrifice N permanents" — the affected player picks
+        // CR 701.21a: "Sacrifice N permanents" — the affected player picks
         // which `count` permanents out of the eligible pool. Clamped to pool
         // size for safety; the branch above handles the mandatory-all case.
         let choice_count = count.min(eligible.len());
@@ -443,7 +445,7 @@ mod tests {
         assert!(state.cost_payment_failed_flag);
     }
 
-    // CR 701.16a: When the target filter scopes sacrifice to opponents
+    // CR 701.21a: When the target filter scopes sacrifice to opponents
     // (ControllerRef::Opponent) or a target player (ControllerRef::TargetPlayer),
     // the affected player — not the ability controller — both provides the
     // eligible permanent pool and makes the choice.
@@ -704,9 +706,9 @@ mod tests {
 
     /// Issue #320 (Tergrid's Shadow): "Each player sacrifices two creatures."
     /// parses as `Effect::Sacrifice { target: Typed(Creature, controller: None) }`
-    /// with `player_scope: All`. Per CR 608.2 + CR 109.5, the player_scope
-    /// iteration loop must rebind `controller` to each player so the
-    /// sacrifice resolver picks the iterated player as chooser. Resolved
+    /// with `player_scope: All`. The player_scope iteration loop must rebind
+    /// `controller` to each player so the sacrifice resolver picks the
+    /// iterated player as chooser. Resolved
     /// incidentally by the issue #310 spell-cast `player_scope` propagation
     /// fix, but pinned here at the resolver layer for direct coverage.
     #[test]

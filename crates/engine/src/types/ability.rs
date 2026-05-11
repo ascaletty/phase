@@ -1360,8 +1360,9 @@ pub enum ControllerRef {
     /// object target inherited by this chained effect ("that permanent's
     /// controller may sacrifice a land").
     ParentTargetController,
-    /// CR 508.1b + CR 603.4: Filter controller is the defending player for the
-    /// source attacking creature in the current combat. Used by intervening-if
+    /// CR 508.5 / CR 508.5a: Filter controller is the defending player for
+    /// the source attacking creature, resolved per attacker through
+    /// `combat::defending_player_for_attacker`. Used by intervening-if
     /// quantity checks such as "defending player controls more lands than you."
     DefendingPlayer,
 }
@@ -2073,8 +2074,9 @@ pub enum TargetFilter {
     /// "that player exiles that many cards" where the affected player is the
     /// damage recipient, not the replacement source or damage source.
     PostReplacementDamageTarget,
-    /// CR 506.3d: Resolves to the player being attacked by the source creature.
-    /// Looked up from `state.combat.attackers` using the trigger's source_id.
+    /// CR 508.5 / CR 508.5a: Resolves to the defending player for the source
+    /// attacking creature, looked up per attacker through
+    /// `combat::defending_player_for_attacker`.
     DefendingPlayer,
     /// Matches objects whose name equals the source's ChosenAttribute::CardName.
     /// Used for "card with the chosen name" patterns.
@@ -2134,9 +2136,11 @@ pub enum PlayerScope {
     /// "enchanted creature gets +1/+1 for each card in its controller's
     /// hand", where "its" refers to the enchanted creature, not the Aura.
     RecipientController,
-    /// CR 508.1b + CR 603.4: The defending player for the source creature's
-    /// attack. Used by attack-trigger intervening-if quantities such as
-    /// "no opponent has more life than that player."
+    /// CR 508.5 / CR 508.5a: The defending player for the source attacking
+    /// creature, resolved per attacker through
+    /// `combat::defending_player_for_attacker`. Used by attack-trigger
+    /// intervening-if quantities such as "no opponent has more life than that
+    /// player."
     DefendingPlayer,
 }
 

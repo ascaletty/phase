@@ -1889,10 +1889,11 @@ fn resolve_counters_on_scope(
     counter_type: Option<&str>,
 ) -> i32 {
     match scope {
-        // CR 122.2 + CR 400.7 + CR 603.10a: When the source has changed zones
-        // (e.g., a dies-trigger reading "counters on ~"), `obj.counters` has
-        // been cleared by `apply_zone_exit_cleanup`. The LKI snapshot captured
-        // there preserves the pre-exit counter map per CR 400.7's "new object"
+        // CR 122.2 + CR 400.7 + CR 603.10a: When the source or triggering
+        // event source has changed zones (e.g., a dies-trigger reading
+        // "counters on ~"), `obj.counters` has been cleared by
+        // `apply_zone_exit_cleanup`. The LKI snapshot captured there
+        // preserves the pre-exit counter map per CR 400.7's "new object"
         // semantics.
         //
         // The fallback must be zone-keyed, not presence-keyed: an object that
@@ -1906,12 +1907,15 @@ fn resolve_counters_on_scope(
         // (where the cleared field becomes `None`); the counter analogue must
         // be zone-keyed because an empty `HashMap<CounterType, u32>` is
         // `Some({})`, not `None`.
-        ObjectScope::Source => {
-            let live = state.objects.get(&ctx.source);
+        ObjectScope::Source | ObjectScope::EventSource => {
+            let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
+                return 0;
+            };
+            let live = state.objects.get(&object_id);
             let on_battlefield =
                 live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
             if !on_battlefield {
-                if let Some(lki) = state.lki_cache.get(&ctx.source) {
+                if let Some(lki) = state.lki_cache.get(&object_id) {
                     return counter_count_from_map(&lki.counters, counter_type);
                 }
             }
@@ -4514,6 +4518,58 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn resolve_quantity_counters_on_event_source_falls_back_to_lki_after_zone_change() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Runecarved Obelisk".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 3);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        state.current_trigger_event = Some(
+            events
+                .iter()
+                .find_map(|event| match event {
+                    crate::types::events::GameEvent::ZoneChanged { object_id, .. }
+                        if *object_id == source =>
+                    {
+                        Some(event.clone())
+                    }
+                    _ => None,
+                })
+                .expect("move_to_zone must emit a ZoneChanged event"),
+        );
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::EventSource,
+                counter_type: Some("charge".to_string()),
+            },
+        };
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: expr.clone(),
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 3);
     }
 
     /// CR 122.1: `AnyCountersOnSelf` sums every counter type on the source

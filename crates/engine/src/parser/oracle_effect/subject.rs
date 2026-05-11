@@ -20,8 +20,8 @@ use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_static::{
-    parse_additive_type_clause_modifications, parse_continuous_modifications,
-    parse_static_line_multi,
+    parse_additive_type_clause_modifications, parse_chosen_qualifier_subject,
+    parse_continuous_modifications, parse_static_line_multi,
 };
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{
@@ -1846,19 +1846,29 @@ fn build_restriction_clause(
             let mut def = StaticDefinition::new(mode.clone())
                 .affected(affected.clone())
                 .description(predicate.to_string());
-            // CR 613.2 layer 6: Combat/untap restriction modes with a duration are enforced
-            // via active_static_definitions() — inject AddStaticMode so the layer system
-            // propagates them onto the targeted object (CR 509.1a + CR 508.1d + CR 502.5).
-            if duration.is_some()
-                && matches!(
-                    mode,
-                    StaticMode::CantBlock
-                        | StaticMode::CantAttack
-                        | StaticMode::CantAttackOrBlock
-                        | StaticMode::CantBeBlocked
-                        | StaticMode::CantUntap
-                )
-            {
+            // CR 613.2 layer 6 + CR 509.1b (issue #327): Combat/untap restriction
+            // modes granted to a target need AddStaticMode so the layer system
+            // propagates them onto the granted creature's `static_definitions`
+            // — without it, the transient continuous effect carries empty
+            // modifications and the runtime block / attack check never sees
+            // the rule. Unconditional on duration: a leading "Until your
+            // next turn, ..." clause is duration-stripped by `peel_clause`
+            // before `build_restriction_clause` runs, so `duration` here can
+            // be `None` even when the restriction is duration-scoped — the
+            // peeled duration is reapplied via `with_clause_duration` on the
+            // outer clause. The injection is intrinsic to the mode, not the
+            // duration: intrinsic statics never reach this grant path
+            // (`build_restriction_clause` is the subject-predicate route).
+            if matches!(
+                mode,
+                StaticMode::CantBlock
+                    | StaticMode::CantAttack
+                    | StaticMode::CantAttackOrBlock
+                    | StaticMode::CantBeBlocked
+                    | StaticMode::CantBeBlockedBy { .. }
+                    | StaticMode::CantBeBlockedExceptBy { .. }
+                    | StaticMode::CantUntap
+            ) {
                 def = def.modifications(vec![ContinuousModification::AddStaticMode {
                     mode: mode.clone(),
                 }]);
@@ -1974,7 +1984,17 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     .parse(lower)
     {
         let filter_text = by_rest.trim_end_matches('.').trim_end_matches(" this turn");
-        let (filter, _) = parse_type_phrase(filter_text);
+        // CR 105.4 + CR 608.2c (issue #327): Try the "of the chosen / of that"
+        // qualifier parser first so "creatures of that color" lowers to a
+        // typed filter with `FilterProp::IsChosenColor`. The plain
+        // `parse_type_phrase` would silently drop the trailing qualifier and
+        // leave the filter as a bare-creature match, making the restriction
+        // accept ALL creatures rather than only those of the chosen color.
+        let filter_tp = TextPair::new(filter_text, filter_text);
+        let filter = parse_chosen_qualifier_subject(&filter_tp).unwrap_or_else(|| {
+            let (f, _) = parse_type_phrase(filter_text);
+            f
+        });
         if !matches!(filter, TargetFilter::Any) {
             return Some(vec![StaticMode::CantBeBlockedBy { filter }]);
         }

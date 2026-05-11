@@ -5680,7 +5680,33 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
     };
 
     let modes = parse_restriction_modes(clean)?;
-    let statics: Vec<StaticDefinition> = modes.into_iter().map(StaticDefinition::new).collect();
+    let statics: Vec<StaticDefinition> = modes
+        .into_iter()
+        .map(|mode| {
+            // CR 508.1d + CR 509.1a + CR 509.1b (issue #327): Duration-scoped
+            // combat restriction modes must carry an `AddStaticMode`
+            // modification so the transient continuous effect propagates
+            // them onto the recipient's `static_definitions` at layer-apply
+            // time. Without this, the runtime block / attack check never
+            // sees the rule. Mirrors the injection in
+            // `subject::build_restriction_clause`.
+            let needs_propagation = matches!(
+                mode,
+                StaticMode::CantBlock
+                    | StaticMode::CantAttack
+                    | StaticMode::CantAttackOrBlock
+                    | StaticMode::CantBeBlocked
+                    | StaticMode::CantBeBlockedBy { .. }
+                    | StaticMode::CantBeBlockedExceptBy { .. }
+                    | StaticMode::CantUntap
+            );
+            let mut def = StaticDefinition::new(mode.clone());
+            if needs_propagation {
+                def = def.modifications(vec![ContinuousModification::AddStaticMode { mode }]);
+            }
+            def
+        })
+        .collect();
     Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
         static_abilities: statics,
         duration: Some(duration),

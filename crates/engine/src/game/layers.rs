@@ -1256,6 +1256,90 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
     sorted
 }
 
+/// CR 509.1b + CR 105.4 (issue #327): True when a granted `StaticMode`
+/// carries a `FilterProp::IsChosenColor` reference somewhere in its filter,
+/// requiring the granting source's chosen color to be resolved at
+/// apply-time. See `resolve_static_mode_chosen_color`.
+fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bool {
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::CantBeBlockedBy { filter } => target_filter_uses_chosen_color(filter),
+        _ => false,
+    }
+}
+
+/// CR 509.1b + CR 105.4 (issue #327): Walk a `TargetFilter` looking for
+/// `FilterProp::IsChosenColor`. Mirrors the chosen-ref detection pattern in
+/// `effects::prevent_damage::resolve_source_filter`.
+fn target_filter_uses_chosen_color(filter: &TargetFilter) -> bool {
+    use crate::types::ability::FilterProp;
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::IsChosenColor)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_uses_chosen_color)
+        }
+        _ => false,
+    }
+}
+
+/// CR 509.1b + CR 105.4 + CR 609.6 (issue #327): Resolve every
+/// `FilterProp::IsChosenColor` inside the static mode's filter to a concrete
+/// `FilterProp::HasColor { color }`, using the granting source's chosen
+/// color. When no chosen color is available, the IsChosenColor prop is
+/// stripped — leaving an unresolvable predicate on the recipient would make
+/// the restriction match every creature.
+fn resolve_static_mode_chosen_color(
+    mode: &crate::types::statics::StaticMode,
+    chosen_color: Option<crate::types::mana::ManaColor>,
+) -> crate::types::statics::StaticMode {
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::CantBeBlockedBy { filter } => StaticMode::CantBeBlockedBy {
+            filter: resolve_chosen_color_in_filter(filter, chosen_color),
+        },
+        other => other.clone(),
+    }
+}
+
+/// CR 105.4 + CR 609.6 (issue #327): Walk a `TargetFilter` and replace every
+/// `FilterProp::IsChosenColor` with a concrete `FilterProp::HasColor` keyed
+/// to the supplied chosen color. Mirrors
+/// `effects::prevent_damage::resolve_source_filter`.
+fn resolve_chosen_color_in_filter(
+    filter: &TargetFilter,
+    chosen_color: Option<crate::types::mana::ManaColor>,
+) -> TargetFilter {
+    use crate::types::ability::FilterProp;
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let mut resolved = tf.clone();
+            resolved
+                .properties
+                .retain(|p| !matches!(p, FilterProp::IsChosenColor));
+            if let Some(color) = chosen_color {
+                resolved.properties.push(FilterProp::HasColor { color });
+            }
+            TargetFilter::Typed(resolved)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|f| resolve_chosen_color_in_filter(f, chosen_color))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|f| resolve_chosen_color_in_filter(f, chosen_color))
+                .collect(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Apply a single continuous effect to all affected objects.
 ///
 /// CR 400.3 + CR 702.94a: The filter's `InZone` property (via
@@ -1288,8 +1372,32 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             None
         };
 
-    // Pre-read chosen color from source (avoids borrow conflict in the loop)
-    let chosen_color = if matches!(effect.modification, ContinuousModification::AddChosenColor) {
+    // Pre-read chosen color from source (avoids borrow conflict in the loop).
+    // Used by `AddChosenColor` (CR 105.3) AND by `AddKeyword` when the keyword
+    // is `HexproofFrom(ChosenColor)` / `Protection(ChosenColor)` AND by
+    // `AddStaticMode` when the static mode carries an `IsChosenColor` filter
+    // prop — CR 702.11d + CR 702.16 + CR 509.1b + CR 105.4 + CR 609.6: the
+    // granting source's chosen color must be baked into the granted modifier
+    // at apply-time, because the modifier lives on the granted creature
+    // (which has no chosen-color attribute of its own).
+    let chosen_color = if matches!(effect.modification, ContinuousModification::AddChosenColor)
+        || matches!(
+            &effect.modification,
+            ContinuousModification::AddKeyword { keyword }
+                if matches!(
+                    keyword,
+                    crate::types::keywords::Keyword::HexproofFrom(
+                        crate::types::keywords::HexproofFilter::ChosenColor,
+                    ) | crate::types::keywords::Keyword::Protection(
+                        crate::types::keywords::ProtectionTarget::ChosenColor,
+                    )
+                )
+        )
+        || matches!(
+            &effect.modification,
+            ContinuousModification::AddStaticMode { mode }
+                if static_mode_uses_chosen_color(mode)
+        ) {
         state
             .objects
             .get(&effect.source_id)
@@ -1419,8 +1527,40 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             // `Annihilator(_)`, `Cumulative Upkeep(_)`, and any other
             // parameterized keyword variant.
             ContinuousModification::AddKeyword { keyword } => {
-                if !obj.keywords.contains(keyword) {
-                    obj.keywords.push(keyword.clone());
+                // CR 702.11d + CR 702.16 + CR 609.6: When the granted keyword
+                // refers to "the chosen color" of the granting source, resolve
+                // it to the concrete color before push so the keyword is
+                // self-contained on the recipient. `chosen_color` is pre-read
+                // above when the keyword's variant requires it.
+                let resolved_keyword = match keyword {
+                    crate::types::keywords::Keyword::HexproofFrom(
+                        crate::types::keywords::HexproofFilter::ChosenColor,
+                    ) => {
+                        if let Some(color) = chosen_color {
+                            crate::types::keywords::Keyword::HexproofFrom(
+                                crate::types::keywords::HexproofFilter::Color(color),
+                            )
+                        } else {
+                            // No chosen color yet — skip the grant rather than
+                            // pushing an unresolvable variant.
+                            continue;
+                        }
+                    }
+                    crate::types::keywords::Keyword::Protection(
+                        crate::types::keywords::ProtectionTarget::ChosenColor,
+                    ) => {
+                        if let Some(color) = chosen_color {
+                            crate::types::keywords::Keyword::Protection(
+                                crate::types::keywords::ProtectionTarget::Color(color),
+                            )
+                        } else {
+                            continue;
+                        }
+                    }
+                    other => other.clone(),
+                };
+                if !obj.keywords.contains(&resolved_keyword) {
+                    obj.keywords.push(resolved_keyword);
                 }
             }
             // Asymmetric on purpose: `RemoveKeyword` strips every keyword that
@@ -1585,8 +1725,21 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 }
             }
             ContinuousModification::AddStaticMode { mode } => {
-                let def = StaticDefinition::new(mode.clone()).affected(TargetFilter::SelfRef);
-                if !obj.static_definitions.iter_all().any(|sd| sd.mode == *mode) {
+                // CR 509.1b + CR 105.4 + CR 609.6 (issue #327): When the
+                // granted static mode carries an `IsChosenColor` filter prop,
+                // resolve it to a concrete `HasColor(<chosen>)` using the
+                // granting source's chosen color. The static_def is anchored
+                // to the recipient (`affected: SelfRef`) which has no
+                // chosen-color attribute of its own; resolving at apply time
+                // bakes the granting source's choice into the live filter.
+                let resolved_mode = resolve_static_mode_chosen_color(mode, chosen_color);
+                let def =
+                    StaticDefinition::new(resolved_mode.clone()).affected(TargetFilter::SelfRef);
+                if !obj
+                    .static_definitions
+                    .iter_all()
+                    .any(|sd| sd.mode == resolved_mode)
+                {
                     obj.static_definitions.push(def);
                 }
             }

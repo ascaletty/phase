@@ -289,6 +289,10 @@ pub enum HexproofFilter {
     CardType(String),
     /// "hexproof from monocolored", "hexproof from multicolored"
     Quality(String),
+    /// CR 702.11d + CR 105.4 + CR 609.6: "Hexproof from that color" / "from the
+    /// chosen color" — resolved at runtime from the source permanent's
+    /// `chosen_attributes`. Parallels `ProtectionTarget::ChosenColor`.
+    ChosenColor,
 }
 
 /// What a Protection keyword protects from (CR 702.16).
@@ -1566,6 +1570,11 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
         "red" => HexproofFilter::Color(ManaColor::Red),
         "green" => HexproofFilter::Color(ManaColor::Green),
         "monocolored" | "multicolored" => HexproofFilter::Quality(lower),
+        // CR 702.11d + CR 105.4 + CR 609.6: "that color" / "the chosen color"
+        // anaphors after a preceding `Choose a color` instruction. Resolved at
+        // runtime via `ChosenAttribute::Color` on the granting source. Mirrors
+        // `ProtectionTarget::ChosenColor` (CR 702.16).
+        "that color" | "the chosen color" | "chosen color" => HexproofFilter::ChosenColor,
         _ => HexproofFilter::CardType(lower),
     }
 }

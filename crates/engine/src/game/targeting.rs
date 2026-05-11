@@ -843,6 +843,17 @@ fn hexproof_filter_matches(
         HexproofFilter::Quality(quality) => {
             crate::game::keywords::source_matches_quality(source_obj, quality)
         }
+        // CR 702.11d + CR 702.16 + CR 609.6: `ChosenColor` is normally
+        // resolved to a concrete `Color(_)` at layer application time (see
+        // `layers::apply_continuous_effect`). The intrinsic variant arm
+        // remains for cards whose printed text resolves "the chosen color" on
+        // the same object that chose it — mirrors
+        // `source_matches_protection_target` for `ProtectionTarget::ChosenColor`.
+        HexproofFilter::ChosenColor => state
+            .objects
+            .get(&source_id)
+            .and_then(|src| src.chosen_color())
+            .is_some_and(|color| source_obj.color.contains(&color)),
     }
 }
 

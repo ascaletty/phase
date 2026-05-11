@@ -1293,7 +1293,18 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 
             // CR 509.1b: "can't be blocked by <filter>" — extract blocker restriction filter.
             if let Ok((by_rest, _)) = tag::<_, _, OracleError<'_>>("by ").parse(after_blocked) {
-                let (filter, remainder) = parse_type_phrase(by_rest);
+                // CR 105.4 + CR 608.2c (issue #327): Try the chosen-qualifier
+                // parser first so "creatures of that color" / "creatures of
+                // the chosen color" produces a filter with
+                // `FilterProp::IsChosenColor`. Falls back to `parse_type_phrase`
+                // for non-anaphor filter shapes.
+                let by_rest_tp = TextPair::new(by_rest, by_rest);
+                let (filter, remainder) =
+                    if let Some(chosen) = parse_chosen_qualifier_subject(&by_rest_tp) {
+                        (chosen, "")
+                    } else {
+                        parse_type_phrase(by_rest)
+                    };
                 if !matches!(filter, TargetFilter::Any) {
                     let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
                         .affected(TargetFilter::SelfRef)
@@ -4068,10 +4079,17 @@ fn apply_spell_keyword_subject_constraints(
 /// - "Creatures of the chosen color"
 /// - "Creatures of the chosen type your opponents control"
 /// - "creature you control of the chosen type other than this Vehicle"
+/// - "creatures of that color" (CR 608.2c anaphor form after a `Choose a color`)
+/// - "creatures of that type" (CR 608.2c anaphor form after a `Choose a creature type`)
 ///
-/// CR 105.4: "of the chosen color" → `FilterProp::IsChosenColor`
-/// CR 205.3m: "of the chosen type" → `FilterProp::IsChosenCreatureType`
-fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
+/// CR 105.4: "of the chosen color" / "of that color" → `FilterProp::IsChosenColor`
+/// CR 205.3m: "of the chosen type" / "of that type" → `FilterProp::IsChosenCreatureType`
+///
+/// Issue #327: the "of that color" / "of that type" anaphor forms are
+/// equivalent to "of the chosen color" / "of the chosen type" — same typed
+/// reference, same runtime resolution. They differ only orthographically
+/// (CR 608.2c anaphor vs CR 113.6 explicit chosen-attribute reference).
+pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
     type VE<'a> = OracleError<'a>;
 
     // Must start with "creature" or "creatures"
@@ -4083,18 +4101,23 @@ fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
         return None;
     };
 
-    // Try to find "of the chosen color" or "of the chosen type" somewhere in the rest
+    // Try to find "of the chosen color" / "of that color" / "of the chosen
+    // type" / "of that type" somewhere in the rest. Same typed reference for
+    // both anaphor forms — see fn doc.
     let chosen_prop: FilterProp;
     let before_chosen: &str;
     let after_chosen: &str;
 
-    if let Ok((_, (before, after))) = nom_primitives::split_once_on(rest, "of the chosen color") {
+    let color_split = nom_primitives::split_once_on(rest, "of the chosen color")
+        .or_else(|_| nom_primitives::split_once_on(rest, "of that color"));
+    let type_split = nom_primitives::split_once_on(rest, "of the chosen type")
+        .or_else(|_| nom_primitives::split_once_on(rest, "of that type"));
+
+    if let Ok((_, (before, after))) = color_split {
         chosen_prop = FilterProp::IsChosenColor;
         before_chosen = before.trim();
         after_chosen = after.trim();
-    } else if let Ok((_, (before, after))) =
-        nom_primitives::split_once_on(rest, "of the chosen type")
-    {
+    } else if let Ok((_, (before, after))) = type_split {
         chosen_prop = FilterProp::IsChosenCreatureType;
         before_chosen = before.trim();
         after_chosen = after.trim();
@@ -6248,7 +6271,13 @@ fn parse_enchanted_equipped_predicate(
         // CR 509.1b: "can't be blocked by <filter>" → CantBeBlockedBy
         if let Some(rest) = nom_tag_lower(&pred_lower, &pred_lower, "can't be blocked by ") {
             let filter_text = rest.trim_end_matches('.');
-            let (filter, _) = parse_type_phrase(filter_text);
+            // CR 105.4 + CR 608.2c (issue #327): see parallel comment in
+            // `parse_static_line_inner`'s CantBeBlockedBy branch.
+            let filter_text_tp = TextPair::new(filter_text, filter_text);
+            let filter = parse_chosen_qualifier_subject(&filter_text_tp).unwrap_or_else(|| {
+                let (f, _) = parse_type_phrase(filter_text);
+                f
+            });
             if !matches!(filter, TargetFilter::Any) {
                 return Some(
                     StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
@@ -17058,5 +17087,47 @@ mod snapshot_tests {
     fn static_granted_keyword() {
         let def = parse_static_line("Creatures you control have flying.").unwrap();
         insta::assert_json_snapshot!(def);
+    }
+
+    /// Issue #327: "of that color" anaphor (post-Choose) is the equivalent of
+    /// "of the chosen color" and must lower to a filter with IsChosenColor.
+    #[test]
+    fn parse_chosen_qualifier_subject_recognizes_that_color_anaphor() {
+        let lower = "creatures of that color".to_string();
+        let tp = TextPair::new("creatures of that color", &lower);
+        let filter = parse_chosen_qualifier_subject(&tp).expect("anaphor form should parse");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::IsChosenColor)),
+                    "expected IsChosenColor in properties, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed creature filter, got {other:?}"),
+        }
+    }
+
+    /// Issue #327: "of the chosen color" (explicit form) must still produce
+    /// the same IsChosenColor filter so the two grammatical forms unify.
+    #[test]
+    fn parse_chosen_qualifier_subject_recognizes_chosen_color_explicit() {
+        let lower = "creatures of the chosen color".to_string();
+        let tp = TextPair::new("creatures of the chosen color", &lower);
+        let filter = parse_chosen_qualifier_subject(&tp).expect("explicit form should parse");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::IsChosenColor)),
+                    "expected IsChosenColor in properties, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed creature filter, got {other:?}"),
+        }
     }
 }

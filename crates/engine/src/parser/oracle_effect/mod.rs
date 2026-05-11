@@ -6375,8 +6375,29 @@ fn replace_target_with_parent(effect: &mut Effect) {
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::GenericEffect { target, .. } => {
+        // CR 608.2c (issue #327): A `GenericEffect` carries both an outer
+        // `target` slot (used by the runtime as the broadcast filter) AND
+        // per-static `affected` slots (used by the layer system to decide
+        // which objects receive each modification). When this rewriter is
+        // invoked for an anaphoric "It" clause that follows a typed earlier
+        // clause, the parser-emitted `affected: SelfRef` on inner static
+        // definitions is the same pronoun-resolution mistake as the outer
+        // `target: None` — both must rewrite to ParentTarget so the granted
+        // modifications attach to the same chosen object. Without this,
+        // chained "Choose → grant → grant" abilities (Skrelv, Defector Mite;
+        // similar siblings) emit a static_def pinned to SelfRef that the
+        // runtime applies to the source rather than the chosen target.
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => {
             *target = Some(TargetFilter::ParentTarget);
+            for static_def in static_abilities {
+                if matches!(static_def.affected, Some(TargetFilter::SelfRef)) {
+                    static_def.affected = Some(TargetFilter::ParentTarget);
+                }
+            }
         }
         _ => {
             // Effects without a target field (Draw, GainLife, etc.) stay as-is.
@@ -18086,6 +18107,119 @@ mod tests {
                 choice_type: ChoiceType::Color,
                 persist: false
             }
+        );
+    }
+
+    /// Issue #327: Skrelv, Defector Mite — the third sub-ability in the
+    /// chained "Choose color → grant hexproof+toxic → grant can't-be-blocked"
+    /// composition must bind "It" to `ParentTarget` (not `SelfRef`), produce
+    /// a filter with `FilterProp::IsChosenColor`, and carry the
+    /// `AddStaticMode` modification so the layer system pushes the restriction
+    /// onto the granted creature at runtime.
+    #[test]
+    fn skrelv_chained_cant_be_blocked_anaphor_binds_to_parent_target() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Choose a color. Another target creature you control gains toxic 1 and hexproof from that color until end of turn. It can't be blocked by creatures of that color this turn.",
+            AbilityKind::Activated,
+        );
+        // Walk to the third sub_ability in the chain.
+        let inner = def
+            .sub_ability
+            .as_ref()
+            .expect("must have sub_ability (Choose -> grant)")
+            .sub_ability
+            .as_ref()
+            .expect("must have second sub_ability (grant -> cant-be-blocked)");
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } = &*inner.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", inner.effect);
+        };
+        // Axis 1: outer target slot anaphors to ParentTarget (the chosen creature).
+        assert_eq!(
+            target,
+            &Some(TargetFilter::ParentTarget),
+            "outer target must be ParentTarget, got {target:?}"
+        );
+        let static_def = &static_abilities[0];
+        // Axis 1 inner: static_def.affected was SelfRef before fix; now ParentTarget.
+        assert_eq!(
+            static_def.affected,
+            Some(TargetFilter::ParentTarget),
+            "static.affected must be ParentTarget, got {:?}",
+            static_def.affected
+        );
+        // Axis 2: CantBeBlockedBy filter carries IsChosenColor.
+        let StaticMode::CantBeBlockedBy { filter } = &static_def.mode else {
+            panic!("expected CantBeBlockedBy mode, got {:?}", static_def.mode);
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "filter must contain IsChosenColor, got {:?}",
+            tf.properties
+        );
+        // Axis 3: modifications carry AddStaticMode so the runtime grant pipeline
+        // actually pushes the restriction onto the granted creature.
+        assert!(
+            static_def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeBlockedBy { .. }
+                }
+            )),
+            "modifications must contain AddStaticMode(CantBeBlockedBy), got {:?}",
+            static_def.modifications
+        );
+    }
+
+    /// Issue #327: The second sub-ability in Skrelv's chain grants `Toxic 1`
+    /// and `HexproofFrom(ChosenColor)` to the chosen creature. The
+    /// HexproofFrom payload must be the typed `ChosenColor` variant, not the
+    /// stringly-typed `CardType("that color")` fallback.
+    #[test]
+    fn skrelv_hexproof_from_chosen_color_uses_typed_variant() {
+        use crate::types::keywords::{HexproofFilter, Keyword};
+        let def = parse_effect_chain(
+            "Choose a color. Another target creature you control gains toxic 1 and hexproof from that color until end of turn. It can't be blocked by creatures of that color this turn.",
+            AbilityKind::Activated,
+        );
+        let grant = def
+            .sub_ability
+            .as_ref()
+            .expect("must have sub_ability (Choose -> grant)");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*grant.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", grant.effect);
+        };
+        let has_typed_hexproof = static_abilities
+            .iter()
+            .flat_map(|s| &s.modifications)
+            .any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::HexproofFrom(HexproofFilter::ChosenColor),
+                    }
+                )
+            });
+        assert!(
+            has_typed_hexproof,
+            "expected HexproofFrom(ChosenColor) typed variant, got {:?}",
+            static_abilities
+                .iter()
+                .flat_map(|s| s.modifications.iter())
+                .collect::<Vec<_>>()
         );
     }
 

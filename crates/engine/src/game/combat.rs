@@ -2787,6 +2787,98 @@ mod tests {
         assert!(!can_block_pair(&state, blocker, attacker));
     }
 
+    /// CR 509.1b + CR 105.4 + CR 609.6 (issue #327): Skrelv-class — when a
+    /// creature is granted `CantBeBlockedBy { IsChosenColor }` via a
+    /// transient continuous effect whose source has a `ChosenAttribute::Color`,
+    /// the layer system resolves IsChosenColor → HasColor(<chosen>) at
+    /// apply-time. A blocker whose colors contain the chosen color is
+    /// prohibited; a blocker of a different color is allowed.
+    ///
+    /// Exercises the full apply-time pipeline: a granting source (Skrelv
+    /// stand-in) with `ChosenAttribute::Color(Red)`, an
+    /// `AddStaticMode { CantBeBlockedBy { IsChosenColor } }` transient
+    /// continuous effect aimed at the granted creature, and
+    /// `evaluate_layers` running the resolver. The runtime block check
+    /// then reads the post-resolution filter via
+    /// `block_restriction_statics_against`.
+    #[test]
+    fn granted_cant_be_blocked_by_chosen_color_resolves_at_apply_time() {
+        use crate::types::ability::{
+            ChosenAttribute, ContinuousModification, Duration, FilterProp, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::mana::ManaColor;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        let source = create_creature(&mut state, PlayerId(0), "Granting Source", 1, 1);
+        let granted = create_creature(&mut state, PlayerId(0), "Target Creature", 2, 2);
+        let red_blocker = create_creature(&mut state, PlayerId(1), "Red Bear", 2, 2);
+        let blue_blocker = create_creature(&mut state, PlayerId(1), "Blue Wizard", 2, 2);
+        state
+            .objects
+            .get_mut(&red_blocker)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+        state
+            .objects
+            .get_mut(&blue_blocker)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+
+        // Persist the chosen color on the granting source — this is what the
+        // `Choose a color` resolver stores on the activating permanent.
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
+
+        // Register the transient continuous effect that grants
+        // `AddStaticMode { CantBeBlockedBy { IsChosenColor } }` to the target.
+        // This is exactly what `effect::resolve` produces when Skrelv's third
+        // sub-ability resolves on its chosen creature target.
+        let unresolved_mode = StaticMode::CantBeBlockedBy {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::IsChosenColor]),
+            ),
+        };
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: granted },
+            vec![ContinuousModification::AddStaticMode {
+                mode: unresolved_mode,
+            }],
+            None,
+        );
+
+        // Run the layer system. The `AddStaticMode` arm in
+        // `apply_continuous_effect` resolves IsChosenColor → HasColor(Red)
+        // using the source's chosen_attributes and pushes the resolved
+        // static_def onto the granted creature.
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // Red blocker matches the chosen color → block is illegal.
+        assert!(
+            validate_blockers(&state, &[(red_blocker, granted)]).is_err(),
+            "red blocker should be prohibited (chosen color = red)"
+        );
+        assert!(
+            !can_block_pair(&state, red_blocker, granted),
+            "red blocker should not be able to block"
+        );
+        // Blue blocker does NOT match — block is legal.
+        assert!(
+            can_block_pair(&state, blue_blocker, granted),
+            "blue blocker should be able to block (color differs from chosen)"
+        );
+    }
+
     /// CR 509.1b + CR 303.4: An Aura-granted `CantBeBlockedBy` (e.g., Snake
     /// Cult Initiation, Pemmin's Aura-class) must propagate to the enchanted
     /// creature, with the inner blocker filter resolved against the Aura's

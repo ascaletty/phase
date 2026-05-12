@@ -6325,9 +6325,9 @@ fn is_blocked_by_per_turn_cast_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::CardDatabase;
     use crate::game::zones;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, CastPermissionConstraint, CastVariantPaid,
@@ -6373,20 +6373,6 @@ mod tests {
                 expiry: None,
             });
         }
-    }
-
-    fn card_database_from_export() -> CardDatabase {
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let paths = [
-            manifest_dir.join("../../client/public/card-data.json"),
-            std::path::PathBuf::from("client/public/card-data.json"),
-            std::path::PathBuf::from("../../client/public/card-data.json"),
-        ];
-        let path = paths
-            .iter()
-            .find(|path| path.exists())
-            .expect("client/public/card-data.json must exist for real-card runtime tests");
-        CardDatabase::from_export(path).expect("card-data.json loads as a valid export")
     }
 
     fn foretell_test_cost() -> ManaCost {
@@ -13111,6 +13097,40 @@ mod tests {
         obj_id
     }
 
+    fn add_echo_of_eons_to_graveyard(state: &mut GameState) -> ObjectId {
+        let echo_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Echo of Eons".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&echo_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.color.push(ManaColor::Blue);
+        obj.base_color = obj.color.clone();
+        obj.base_keywords
+            .push(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Blue],
+            })));
+        obj.keywords = obj.base_keywords.clone();
+
+        let ability = parse_effect_chain(
+            "Each player shuffles their hand and graveyard into their library, then draws seven cards.",
+            AbilityKind::Spell,
+        );
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        Arc::make_mut(&mut obj.base_abilities).push(ability);
+        echo_id
+    }
+
     #[test]
     fn flashback_card_appears_castable_from_graveyard() {
         let mut state = setup_game_at_main_phase();
@@ -13135,17 +13155,8 @@ mod tests {
     #[test]
     fn echo_of_eons_flashback_castable_with_nonempty_hand() {
         let mut state = setup_game_at_main_phase();
-        let db = card_database_from_export();
-        let echo_face = db
-            .get_face_by_name("Echo of Eons")
-            .expect("Echo of Eons exists in card-data.json");
-        let echo_id = crate::game::deck_loading::create_object_from_card_face(
-            &mut state,
-            echo_face,
-            PlayerId(0),
-        );
+        let echo_id = add_echo_of_eons_to_graveyard(&mut state);
         let echo_card_id = state.objects.get(&echo_id).unwrap().card_id;
-        zones::move_to_zone(&mut state, echo_id, Zone::Graveyard, &mut Vec::new());
 
         let hand_card = create_object(
             &mut state,

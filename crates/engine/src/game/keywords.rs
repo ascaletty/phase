@@ -746,6 +746,7 @@ mod tests {
                 color,
                 source_id: ObjectId(0),
                 snow: false,
+                source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,

@@ -185,6 +185,9 @@ pub struct ManaSourceOption {
     /// shard-matching lookup; the full mana production is driven by
     /// `atomic_combination`.
     pub mana_type: ManaType,
+    /// True when the source object could produce two or more colors of mana.
+    /// Used for `{Z}` cost payment.
+    pub source_could_produce_two_or_more_colors: bool,
     /// CR 605.3b — classification of this activation's penalty axis.
     /// Single source of truth for auto-tap prioritization, `max_x_value`
     /// free-producer gating, AI life-cost scoring, and `UntapLandForMana`
@@ -683,6 +686,9 @@ fn land_mana_options(
                 object_id,
                 ability_index: None,
                 mana_type,
+                source_could_produce_two_or_more_colors: source_could_produce_two_or_more_colors(
+                    state, object_id, controller,
+                ),
                 penalty: ManaSourcePenalty::None,
                 atomic_combination: None,
             });
@@ -725,11 +731,14 @@ fn scan_mana_abilities(
         }
 
         let penalty = mana_ability_penalty(ability);
+        let source_could_produce_two_or_more_colors =
+            source_could_produce_two_or_more_colors(state, object_id, controller);
         for row in emit_source_rows(state, controller, object_id, ability_index, ability) {
             let option = ManaSourceOption {
                 object_id,
                 ability_index: Some(ability_index),
                 mana_type: row.mana_type,
+                source_could_produce_two_or_more_colors,
                 penalty,
                 atomic_combination: row.atomic_combination,
             };
@@ -913,6 +922,71 @@ fn mana_options_from_production(
         // there is no trigger context — this variant has no pre-resolution
         // option set and contributes nothing to mana-source analysis.
         ManaProduction::TriggerEventManaType => Vec::new(),
+    }
+}
+
+pub(crate) fn source_could_produce_two_or_more_colors(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+
+    let mut colors = Vec::new();
+    for ability in obj.abilities.iter() {
+        if ability.kind != AbilityKind::Activated
+            || !super::mana_abilities::is_mana_ability(ability)
+        {
+            continue;
+        }
+        let Effect::Mana { produced, .. } = &*ability.effect else {
+            continue;
+        };
+        collect_production_colors(state, controller, object_id, produced, &mut colors);
+        if colors.len() >= 2 {
+            return true;
+        }
+    }
+
+    for subtype in &obj.card_types.subtypes {
+        if let Some(mana_type) = mana_payment::land_subtype_to_mana_type(subtype) {
+            if mana_type != ManaType::Colorless && !colors.contains(&mana_type) {
+                colors.push(mana_type);
+            }
+            if colors.len() >= 2 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+pub(crate) fn mana_production_could_produce_two_or_more_colors(
+    state: &GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+    produced: &ManaProduction,
+) -> bool {
+    let mut colors = Vec::new();
+    collect_production_colors(state, controller, source_id, produced, &mut colors);
+    colors.len() >= 2
+}
+
+fn collect_production_colors(
+    state: &GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+    produced: &ManaProduction,
+    colors: &mut Vec<ManaType>,
+) {
+    for mana_type in mana_options_from_production(state, controller, source_id, produced) {
+        if mana_type == ManaType::Colorless || colors.contains(&mana_type) {
+            continue;
+        }
+        colors.push(mana_type);
     }
 }
 

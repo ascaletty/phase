@@ -6256,6 +6256,7 @@ mod tests {
                 color,
                 source_id: ObjectId(0),
                 snow: false,
+                source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
@@ -6442,6 +6443,7 @@ mod tests {
             color: ManaType::Red,
             source_id: ObjectId(1),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
                 keyword: Keyword::Haste,

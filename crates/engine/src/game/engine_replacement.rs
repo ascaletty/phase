@@ -226,6 +226,7 @@ pub(super) fn handle_replacement_choice(
                                 color: mana_type,
                                 source_id,
                                 snow: false,
+                                source_could_produce_two_or_more_colors: false,
                                 restrictions: Vec::new(),
                                 grants: Vec::new(),
                                 expiry: None,

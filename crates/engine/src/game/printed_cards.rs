@@ -524,7 +524,10 @@ fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
         ManaCostShard::ColorlessBlack => vec![ManaColor::Black],
         ManaCostShard::ColorlessRed => vec![ManaColor::Red],
         ManaCostShard::ColorlessGreen => vec![ManaColor::Green],
-        ManaCostShard::Colorless | ManaCostShard::Snow | ManaCostShard::X => vec![],
+        ManaCostShard::Colorless
+        | ManaCostShard::Snow
+        | ManaCostShard::X
+        | ManaCostShard::TwoOrMoreColorSource => vec![],
     }
 }
 

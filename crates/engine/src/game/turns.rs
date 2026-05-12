@@ -1480,6 +1480,7 @@ mod tests {
             color: ManaType::Green,
             source_id: ObjectId(1),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,

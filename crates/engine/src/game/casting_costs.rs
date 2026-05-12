@@ -2534,12 +2534,15 @@ fn count_available_sources(
     available: &[ManaSourceOption],
     used: &HashSet<ObjectId>,
     acceptable: &[ManaType],
+    requires_two_or_more_color_source: bool,
 ) -> usize {
     let mut seen = HashSet::new();
     for opt in available {
         // CR 605.3b: Filter-land combination rows contribute multi-mana
         // atomically. Any color in their combination satisfies the shard.
-        if !used.contains(&opt.object_id) && option_satisfies(opt, acceptable) {
+        if !used.contains(&opt.object_id)
+            && option_satisfies(opt, acceptable, requires_two_or_more_color_source)
+        {
             seen.insert(opt.object_id);
         }
     }
@@ -2549,7 +2552,17 @@ fn count_available_sources(
 /// True iff this source option can contribute any of the acceptable colors.
 /// For single-color rows, checks `mana_type` directly; for combination rows,
 /// checks whether any color in the combination is acceptable.
-fn option_satisfies(opt: &ManaSourceOption, acceptable: &[ManaType]) -> bool {
+fn option_satisfies(
+    opt: &ManaSourceOption,
+    acceptable: &[ManaType],
+    requires_two_or_more_color_source: bool,
+) -> bool {
+    if requires_two_or_more_color_source && !opt.source_could_produce_two_or_more_colors {
+        return false;
+    }
+    if acceptable.is_empty() {
+        return true;
+    }
     match &opt.atomic_combination {
         Some(combo) => combo.iter().any(|t| acceptable.contains(t)),
         None => acceptable.contains(&opt.mana_type),
@@ -2563,10 +2576,14 @@ fn find_least_flexible_source(
     available: &[ManaSourceOption],
     used: &HashSet<ObjectId>,
     acceptable: &[ManaType],
+    requires_two_or_more_color_source: bool,
 ) -> Option<ManaSourceOption> {
     available
         .iter()
-        .filter(|opt| !used.contains(&opt.object_id) && option_satisfies(opt, acceptable))
+        .filter(|opt| {
+            !used.contains(&opt.object_id)
+                && option_satisfies(opt, acceptable, requires_two_or_more_color_source)
+        })
         .min_by_key(|opt| {
             available
                 .iter()
@@ -2729,21 +2746,24 @@ fn auto_tap_mana_sources_inner(
     // Build the typed shard-requirements list first — used by both the
     // combination pre-pass and the main MCV/LCV loop.
     let mut deferred_generic: usize = 0;
-    let mut needs: Vec<(Vec<ManaType>, bool)> = Vec::new();
+    let mut needs: Vec<(Vec<ManaType>, bool, bool)> = Vec::new();
     for shard in shards {
         use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
         match shard_to_mana_type(*shard) {
             ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
-                needs.push((vec![color], false));
+                needs.push((vec![color], false, false));
             }
             ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
-                needs.push((vec![a, b], false));
+                needs.push((vec![a, b], false, false));
             }
             ShardRequirement::TwoGenericHybrid(color) => {
-                needs.push((vec![color], true));
+                needs.push((vec![color], true, false));
             }
             ShardRequirement::ColorlessHybrid(color) => {
-                needs.push((vec![ManaType::Colorless, color], false));
+                needs.push((vec![ManaType::Colorless, color], false, false));
+            }
+            ShardRequirement::TwoOrMoreColorSource => {
+                needs.push((Vec::new(), false, true));
             }
             ShardRequirement::Snow | ShardRequirement::X => {
                 deferred_generic += 1;
@@ -2777,19 +2797,29 @@ fn auto_tap_mana_sources_inner(
     for _ in 0..needs.len() {
         let mut best_idx = None;
         let mut min_sources = usize::MAX;
-        for (i, (acceptable, _)) in needs.iter().enumerate() {
+        for (i, (acceptable, _, requires_two_or_more_color_source)) in needs.iter().enumerate() {
             if assigned[i] {
                 continue;
             }
-            let count = count_available_sources(&available, &used_sources, acceptable);
+            let count = count_available_sources(
+                &available,
+                &used_sources,
+                acceptable,
+                *requires_two_or_more_color_source,
+            );
             if count < min_sources {
                 min_sources = count;
                 best_idx = Some(i);
             }
         }
         let Some(idx) = best_idx else { break };
-        let (ref acceptable, two_generic_fallback) = needs[idx];
-        if let Some(option) = find_least_flexible_source(&available, &used_sources, acceptable) {
+        let (ref acceptable, two_generic_fallback, requires_two_or_more_color_source) = needs[idx];
+        if let Some(option) = find_least_flexible_source(
+            &available,
+            &used_sources,
+            acceptable,
+            requires_two_or_more_color_source,
+        ) {
             used_sources.insert(option.object_id);
             to_tap.push(option);
         } else if two_generic_fallback {
@@ -2936,7 +2966,7 @@ fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> {
 /// `used_sources`, blocking further rows of every combination variant.
 fn assign_combination_sources(
     available: &[ManaSourceOption],
-    needs: &[(Vec<ManaType>, bool)],
+    needs: &[(Vec<ManaType>, bool, bool)],
     assigned: &mut [bool],
     used_sources: &mut HashSet<ObjectId>,
     to_tap: &mut Vec<ManaSourceOption>,
@@ -3005,14 +3035,17 @@ fn assign_combination_sources(
 /// first-fit is sufficient for the filter-land class).
 fn score_combination(
     combo: &[ManaType],
-    needs: &[(Vec<ManaType>, bool)],
+    needs: &[(Vec<ManaType>, bool, bool)],
     assigned: &[bool],
 ) -> (usize, Vec<usize>) {
     let mut locally_consumed: Vec<bool> = assigned.to_vec();
     let mut covered = Vec::new();
     for mana in combo {
-        for (i, (acceptable, _)) in needs.iter().enumerate() {
+        for (i, (acceptable, _, requires_two_or_more_color_source)) in needs.iter().enumerate() {
             if locally_consumed[i] {
+                continue;
+            }
+            if *requires_two_or_more_color_source {
                 continue;
             }
             if acceptable.contains(mana) {
@@ -4190,6 +4223,7 @@ mod tests {
                 color,
                 source_id: floated_source,
                 snow: false,
+                source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,
@@ -4256,6 +4290,7 @@ mod tests {
             color: ManaType::Blue,
             source_id: ObjectId(99),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,

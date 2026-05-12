@@ -232,41 +232,54 @@ fn produce_mana_from_ability(
     // CR 106.6: Resolve spend-restriction templates, grants, and expiry so they
     // attach to each produced `ManaUnit`. Dropping these here is the bug that
     // made Flamebraider's Elemental-only mana behave as unrestricted mana.
-    let (produced_mana, restrictions, grants, expiry) = match &*ability_def.effect {
-        Effect::Mana {
-            produced,
-            restrictions,
-            grants,
-            expiry,
-            target: None,
-        } => {
-            let mana = match color_override {
-                // `Combination` is pre-chosen — skip `resolve_mana_types` entirely
-                // so the exact sequence lands in the pool (CR 605.3b).
-                Some(ProductionOverride::Combination(types)) => types,
-                Some(ProductionOverride::SingleColor(color)) => {
-                    resolve_single_color_override(state, produced, &resolved_for_quantity, color)
-                }
-                None => super::effects::mana::resolve_mana_types_for_ability(
-                    produced,
-                    state,
-                    &resolved_for_quantity,
-                ),
-            };
-            let concrete = resolve_restrictions(restrictions, state, source_id);
-            (mana, concrete, grants.clone(), *expiry)
-        }
-        _ => (Vec::new(), Vec::new(), Vec::new(), None),
-    };
+    let (produced_mana, restrictions, grants, expiry, source_could_produce_two_or_more_colors) =
+        match &*ability_def.effect {
+            Effect::Mana {
+                produced,
+                restrictions,
+                grants,
+                expiry,
+                target: None,
+            } => {
+                let mana = match color_override {
+                    // `Combination` is pre-chosen — skip `resolve_mana_types` entirely
+                    // so the exact sequence lands in the pool (CR 605.3b).
+                    Some(ProductionOverride::Combination(types)) => types,
+                    Some(ProductionOverride::SingleColor(color)) => resolve_single_color_override(
+                        state,
+                        produced,
+                        &resolved_for_quantity,
+                        color,
+                    ),
+                    None => super::effects::mana::resolve_mana_types_for_ability(
+                        produced,
+                        state,
+                        &resolved_for_quantity,
+                    ),
+                };
+                let concrete = resolve_restrictions(restrictions, state, source_id);
+                let source_could_produce_two_or_more_colors =
+                    mana_sources::source_could_produce_two_or_more_colors(state, source_id, player);
+                (
+                    mana,
+                    concrete,
+                    grants.clone(),
+                    *expiry,
+                    source_could_produce_two_or_more_colors,
+                )
+            }
+            _ => (Vec::new(), Vec::new(), Vec::new(), None, false),
+        };
 
     let tapped = mana_sources::has_tap_component(&ability_def.cost);
     for mana_type in produced_mana {
-        mana_payment::produce_mana_with_attributes(
+        mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             source_id,
             mana_type,
             player,
             tapped,
+            source_could_produce_two_or_more_colors,
             &restrictions,
             &grants,
             expiry,
@@ -2006,6 +2019,7 @@ mod tests {
                 color,
                 source_id: ObjectId(0),
                 snow: false,
+                source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,

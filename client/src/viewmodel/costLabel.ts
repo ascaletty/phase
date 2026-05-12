@@ -14,7 +14,7 @@ import { getCrewPower, getSaddlePower } from "./keywordProps.ts";
 // ManaSymbol.tsx already works with these abbreviations ("W", "U", "W/U").
 export const SHARD_ABBREVIATION: Record<string, string> = {
   White: "W", Blue: "U", Black: "B", Red: "R", Green: "G",
-  Colorless: "C", Snow: "S", X: "X",
+  Colorless: "C", Snow: "S", X: "X", TwoOrMoreColorSource: "Z",
   WhiteBlue: "W/U", WhiteBlack: "W/B", BlueBlack: "U/B", BlueRed: "U/R",
   BlackRed: "B/R", BlackGreen: "B/G", RedWhite: "R/W", RedGreen: "R/G",
   GreenWhite: "G/W", GreenBlue: "G/U",

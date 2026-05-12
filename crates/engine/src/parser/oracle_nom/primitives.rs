@@ -144,7 +144,7 @@ pub fn parse_number_or_x(input: &str) -> OracleResult<'_, u32> {
     alt((parse_number, value(0u32, tag("x")))).parse(input)
 }
 
-/// Parse a single mana symbol: `{W}`, `{U}`, `{B}`, `{R}`, `{G}`, `{C}`, `{S}`, `{X}`,
+/// Parse a single mana symbol: `{W}`, `{U}`, `{B}`, `{R}`, `{G}`, `{C}`, `{S}`, `{X}`, `{Z}`,
 /// hybrid symbols `{W/U}`, phyrexian `{W/P}`, two-generic hybrid `{2/W}`,
 /// or generic `{N}` (digit inside braces).
 pub fn parse_mana_symbol(input: &str) -> OracleResult<'_, ManaCostShard> {
@@ -182,6 +182,7 @@ fn parse_mana_symbol_inner(input: &str) -> OracleResult<'_, ManaCostShard> {
         value(ManaCostShard::Colorless, tag("C")),
         value(ManaCostShard::Snow, tag("S")),
         value(ManaCostShard::X, tag("X")),
+        value(ManaCostShard::TwoOrMoreColorSource, tag("Z")),
         // Generic mana: digit(s) inside braces → Colorless placeholder
         // Note: generic mana is accumulated as u32 in ManaCost, not as shards.
         // For the symbol-level combinator we return Colorless as a sentinel;
@@ -1041,6 +1042,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mana_symbol_two_or_more_color_source() {
+        let (rest, shard) = parse_mana_symbol("{Z}").unwrap();
+        assert_eq!(shard, ManaCostShard::TwoOrMoreColorSource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn test_parse_mana_cost_mixed() {
         let (rest, cost) = parse_mana_cost("{2}{W}{U}").unwrap();
         assert_eq!(rest, "");
@@ -1048,6 +1056,19 @@ mod tests {
             ManaCost::Cost { shards, generic } => {
                 assert_eq!(generic, 2);
                 assert_eq!(shards, vec![ManaCostShard::White, ManaCostShard::Blue]);
+            }
+            _ => panic!("expected Cost variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mana_cost_two_or_more_color_source() {
+        let (rest, cost) = parse_mana_cost("{1}{Z}").unwrap();
+        assert_eq!(rest, "");
+        match cost {
+            ManaCost::Cost { shards, generic } => {
+                assert_eq!(generic, 1);
+                assert_eq!(shards, vec![ManaCostShard::TwoOrMoreColorSource]);
             }
             _ => panic!("expected Cost variant"),
         }

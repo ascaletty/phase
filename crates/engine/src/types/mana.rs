@@ -274,6 +274,10 @@ pub struct ManaUnit {
     pub color: ManaType,
     pub source_id: ObjectId,
     pub snow: bool,
+    /// True when this unit was produced by a source that could produce two or
+    /// more colors of mana. Used by the Universes Beyond `{Z}` cost symbol.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub source_could_produce_two_or_more_colors: bool,
     pub restrictions: Vec<ManaRestriction>,
     /// CR 106.6: Properties granted to the spell this mana is spent on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -296,6 +300,7 @@ impl ManaUnit {
             color,
             source_id,
             snow,
+            source_could_produce_two_or_more_colors: false,
             restrictions,
             grants: Vec::new(),
             expiry: None,
@@ -315,6 +320,8 @@ pub enum ManaCostShard {
     Colorless,
     Snow,
     X,
+    /// `{Z}`: one mana from a source that could produce two or more colors.
+    TwoOrMoreColorSource,
     // Hybrid (10 pairs)
     WhiteBlue,
     WhiteBlack,
@@ -455,7 +462,7 @@ impl ManaCostShard {
             // Basic colored (CR 202.3a)
             Self::White | Self::Blue | Self::Black | Self::Red | Self::Green
             // Colorless, Snow
-            | Self::Colorless | Self::Snow
+            | Self::Colorless | Self::Snow | Self::TwoOrMoreColorSource
             // Two-color hybrid: max(1, 1) = 1 (CR 202.3f)
             | Self::WhiteBlue | Self::WhiteBlack | Self::BlueBlack | Self::BlueRed
             | Self::BlackRed | Self::BlackGreen | Self::RedWhite | Self::RedGreen
@@ -489,6 +496,7 @@ impl FromStr for ManaCostShard {
             "C" => Ok(ManaCostShard::Colorless),
             "S" => Ok(ManaCostShard::Snow),
             "X" => Ok(ManaCostShard::X),
+            "Z" => Ok(ManaCostShard::TwoOrMoreColorSource),
             // Hybrid
             "W/U" => Ok(ManaCostShard::WhiteBlue),
             "W/B" => Ok(ManaCostShard::WhiteBlack),
@@ -674,6 +682,10 @@ pub struct ColoredManaCount {
 
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ColoredManaCount {

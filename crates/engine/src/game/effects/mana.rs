@@ -65,6 +65,13 @@ pub fn resolve(
     // `Variable { name: "X" }` branch of `resolve_ref`. Non-X mana production
     // (Fixed, ObjectCount, etc.) is unaffected.
     let mana_types = resolve_mana_types_with_ability(produced, &*state, ability);
+    let source_could_produce_two_or_more_colors =
+        mana_sources::mana_production_could_produce_two_or_more_colors(
+            state,
+            ability.controller,
+            ability.source_id,
+            produced,
+        );
 
     // Resolve restriction templates into concrete restrictions
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
@@ -84,12 +91,13 @@ pub fn resolve(
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
     // into that player's mana pool.
     for mana_type in mana_types {
-        mana_payment::produce_mana_with_attributes(
+        mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             ability.source_id,
             mana_type,
             recipient,
             false,
+            source_could_produce_two_or_more_colors,
             &concrete_restrictions,
             grants,
             expiry,
@@ -128,15 +136,23 @@ pub fn handle_choose_mana_effect(
     };
 
     let mana_types = chosen_mana_types_for_prompt(state, ability, produced, prompt, chosen)?;
+    let source_could_produce_two_or_more_colors =
+        mana_sources::mana_production_could_produce_two_or_more_colors(
+            state,
+            ability.controller,
+            ability.source_id,
+            produced,
+        );
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
     let recipient = ability.controller;
     for mana_type in mana_types {
-        mana_payment::produce_mana_with_attributes(
+        mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             ability.source_id,
             mana_type,
             recipient,
             false,
+            source_could_produce_two_or_more_colors,
             &concrete_restrictions,
             grants,
             *expiry,

@@ -67,6 +67,7 @@ pub fn compute_hand_color_demand(
                             }
                         }
                         ShardRequirement::Snow | ShardRequirement::X => {}
+                        ShardRequirement::TwoOrMoreColorSource => {}
                     }
                 }
             }
@@ -141,6 +142,35 @@ pub fn produce_mana_with_attributes(
     expiry: Option<ManaExpiry>,
     events: &mut Vec<GameEvent>,
 ) {
+    let source_could_produce_two_or_more_colors =
+        super::mana_sources::source_could_produce_two_or_more_colors(state, source_id, player_id);
+    produce_mana_with_attributes_from_source_quality(
+        state,
+        source_id,
+        mana_type,
+        player_id,
+        tapped_for_mana,
+        source_could_produce_two_or_more_colors,
+        restrictions,
+        grants,
+        expiry,
+        events,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn produce_mana_with_attributes_from_source_quality(
+    state: &mut GameState,
+    source_id: ObjectId,
+    mana_type: ManaType,
+    player_id: PlayerId,
+    tapped_for_mana: bool,
+    source_could_produce_two_or_more_colors: bool,
+    restrictions: &[ManaRestriction],
+    grants: &[ManaSpellGrant],
+    expiry: Option<ManaExpiry>,
+    events: &mut Vec<GameEvent>,
+) {
     use crate::game::replacement::{self, ReplacementResult};
     use crate::types::proposed_event::ProposedEvent;
 
@@ -165,6 +195,7 @@ pub fn produce_mana_with_attributes(
             color: final_mana_type,
             source_id,
             snow: false,
+            source_could_produce_two_or_more_colors,
             restrictions: restrictions.to_vec(),
             grants: grants.to_vec(),
             expiry,
@@ -242,7 +273,10 @@ pub fn classify_payment(cost: &ManaCost) -> PaymentClassification {
             ShardRequirement::Phyrexian(..) | ShardRequirement::HybridPhyrexian(..) => {
                 return PaymentClassification::NeedsPhyrexianChoice;
             }
-            ShardRequirement::Single(..) | ShardRequirement::Snow | ShardRequirement::X => {}
+            ShardRequirement::Single(..)
+            | ShardRequirement::Snow
+            | ShardRequirement::X
+            | ShardRequirement::TwoOrMoreColorSource => {}
         }
     }
     PaymentClassification::Unambiguous
@@ -337,6 +371,11 @@ pub fn can_pay_for_spell(
                     // CR 107.4h: Snow mana {S} — paid with mana from a snow source.
                     ShardRequirement::Snow => {
                         if !spend_snow(&mut sim) {
+                            return false;
+                        }
+                    }
+                    ShardRequirement::TwoOrMoreColorSource => {
+                        if spend_two_or_more_color_source_eligible(&mut sim, spell).is_none() {
                             return false;
                         }
                     }
@@ -511,6 +550,9 @@ pub(crate) fn reduce_cost_by_pool(
             }
             // CR 107.4h: Snow mana only from snow sources.
             ShardRequirement::Snow => spend_snow_unit(&mut scratch).is_some(),
+            ShardRequirement::TwoOrMoreColorSource => {
+                spend_two_or_more_color_source_eligible(&mut scratch, spell).is_some()
+            }
             // CR 107.1b: `ManaCost::concretize_x` strips `X` shards into generic
             // before auto-tap runs, so this arm is defensive. Keep the shard in
             // the residual so auto-tap's legacy `deferred_generic += 1` path
@@ -680,6 +722,11 @@ pub fn pay_cost_with_demand_and_choices(
                     // CR 107.4h: Snow mana {S} — paid with mana from a snow source.
                     ShardRequirement::Snow => {
                         let unit = spend_snow_unit(pool).ok_or(PaymentError::InsufficientMana)?;
+                        spent.push(unit);
+                    }
+                    ShardRequirement::TwoOrMoreColorSource => {
+                        let unit = spend_two_or_more_color_source_eligible(pool, spell)
+                            .ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     // CR 107.3: {X} defaults to 0; caller specifies X value separately.
@@ -879,6 +926,9 @@ pub fn compute_phyrexian_shards(
             }
             ShardRequirement::Snow => {
                 let _ = spend_snow_unit(&mut sim);
+            }
+            ShardRequirement::TwoOrMoreColorSource => {
+                let _ = spend_two_or_more_color_source_eligible(&mut sim, spell);
             }
             ShardRequirement::X => {}
             ShardRequirement::ColorlessHybrid(color) => {
@@ -1121,17 +1171,37 @@ pub fn land_subtype_to_mana_type(subtype: &str) -> Option<ManaType> {
 /// Spend one mana of the given color, respecting restrictions if a spell context is provided.
 ///
 /// CR 106.6: Restricted mana can only be spent on spells/abilities that match the restriction.
-/// When `spell` is `Some`, delegates to `ManaPool::spend_for` (restriction-aware).
-/// When `spell` is `None`, delegates to `ManaPool::spend` (unrestricted).
+/// Prefers non-`{Z}`-eligible mana for ordinary colored/colorless requirements
+/// so later source-quality-constrained shards are not starved.
 fn spend_eligible(
     pool: &mut ManaPool,
     color: ManaType,
     spell: Option<&PaymentContext<'_>>,
 ) -> Option<ManaUnit> {
     match spell {
-        Some(meta) => pool.spend_for(color, meta),
-        None => pool.spend(color),
+        Some(ctx) => spend_color_prefer_non_z(pool, color, |unit| {
+            unit.restrictions
+                .iter()
+                .all(|restriction| restriction.allows(ctx))
+        }),
+        None => spend_color_prefer_non_z(pool, color, |_| true),
     }
+}
+
+fn spend_color_prefer_non_z(
+    pool: &mut ManaPool,
+    color: ManaType,
+    allows: impl Fn(&ManaUnit) -> bool,
+) -> Option<ManaUnit> {
+    if let Some(pos) = pool.mana.iter().position(|unit| {
+        unit.color == color && !unit.source_could_produce_two_or_more_colors && allows(unit)
+    }) {
+        return Some(pool.mana.swap_remove(pos));
+    }
+    pool.mana
+        .iter()
+        .position(|unit| unit.color == color && allows(unit))
+        .map(|pos| pool.mana.swap_remove(pos))
 }
 
 // --- Internal helpers ---
@@ -1147,6 +1217,7 @@ pub(crate) enum ShardRequirement {
     Phyrexian(ManaType),
     TwoGenericHybrid(ManaType),
     Snow,
+    TwoOrMoreColorSource,
     X,
     ColorlessHybrid(ManaType),
     HybridPhyrexian(ManaType, ManaType),
@@ -1162,6 +1233,7 @@ pub(crate) fn shard_to_mana_type(shard: ManaCostShard) -> ShardRequirement {
         ManaCostShard::Green => ShardRequirement::Single(ManaType::Green),
         ManaCostShard::Colorless => ShardRequirement::Single(ManaType::Colorless),
         ManaCostShard::Snow => ShardRequirement::Snow,
+        ManaCostShard::TwoOrMoreColorSource => ShardRequirement::TwoOrMoreColorSource,
         ManaCostShard::X => ShardRequirement::X,
         ManaCostShard::WhiteBlue => ShardRequirement::Hybrid(ManaType::White, ManaType::Blue),
         ManaCostShard::WhiteBlack => ShardRequirement::Hybrid(ManaType::White, ManaType::Black),
@@ -1224,7 +1296,7 @@ pub(crate) fn shard_to_mana_type(shard: ManaCostShard) -> ShardRequirement {
 fn spend_any_eligible(pool: &mut ManaPool, spell: Option<&PaymentContext<'_>>) -> Option<ManaUnit> {
     match spell {
         Some(ctx) => {
-            if let Some(unit) = pool.spend_for(ManaType::Colorless, ctx) {
+            if let Some(unit) = spend_eligible(pool, ManaType::Colorless, Some(ctx)) {
                 return Some(unit);
             }
 
@@ -1250,7 +1322,7 @@ fn spend_any_eligible(pool: &mut ManaPool, spell: Option<&PaymentContext<'_>>) -
                     }
                 }
             }
-            best.and_then(|(color, _)| pool.spend_for(color, ctx))
+            best.and_then(|(color, _)| spend_eligible(pool, color, Some(ctx)))
         }
         None => spend_any_unit(pool),
     }
@@ -1262,7 +1334,7 @@ fn spend_any_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
     }
 
     // Prefer colorless first, then least-available color
-    if let Some(unit) = pool.spend(ManaType::Colorless) {
+    if let Some(unit) = spend_eligible(pool, ManaType::Colorless, None) {
         return Some(unit);
     }
 
@@ -1287,7 +1359,7 @@ fn spend_any_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
         }
     }
 
-    best.and_then(|(color, _)| pool.spend(color))
+    best.and_then(|(color, _)| spend_eligible(pool, color, None))
 }
 
 fn spend_snow(pool: &mut ManaPool) -> bool {
@@ -1301,6 +1373,26 @@ fn spend_snow_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
     } else {
         None
     }
+}
+
+fn spend_two_or_more_color_source_eligible(
+    pool: &mut ManaPool,
+    spell: Option<&PaymentContext<'_>>,
+) -> Option<ManaUnit> {
+    let position = match spell {
+        Some(ctx) => pool.mana.iter().position(|unit| {
+            unit.source_could_produce_two_or_more_colors
+                && unit
+                    .restrictions
+                    .iter()
+                    .all(|restriction| restriction.allows(ctx))
+        }),
+        None => pool
+            .mana
+            .iter()
+            .position(|unit| unit.source_could_produce_two_or_more_colors),
+    }?;
+    Some(pool.mana.swap_remove(position))
 }
 
 #[cfg(test)]
@@ -1334,6 +1426,11 @@ mod tests {
             classify_payment(&unambiguous(vec![ManaCostShard::Snow, ManaCostShard::Blue])),
             PaymentClassification::Unambiguous,
             "snow + single color is auto-payable (pay_mana_cost picks deterministically)"
+        );
+        assert_eq!(
+            classify_payment(&unambiguous(vec![ManaCostShard::TwoOrMoreColorSource])),
+            PaymentClassification::Unambiguous,
+            "{{Z}} is source-quality constrained but does not require a player choice"
         );
         assert_eq!(
             classify_payment(&unambiguous(vec![ManaCostShard::WhiteBlue])),
@@ -1376,6 +1473,7 @@ mod tests {
             color,
             source_id: ObjectId(1),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
             expiry: None,
@@ -1390,6 +1488,64 @@ mod tests {
             }
         }
         pool
+    }
+
+    fn make_two_or_more_color_source_unit(color: ManaType) -> ManaUnit {
+        ManaUnit {
+            source_could_produce_two_or_more_colors: true,
+            ..make_unit(color)
+        }
+    }
+
+    #[test]
+    fn pay_cost_accepts_z_from_eligible_source() {
+        let mut pool = ManaPool::default();
+        pool.add(make_two_or_more_color_source_unit(ManaType::Green));
+        pool.add(make_unit(ManaType::Colorless));
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::TwoOrMoreColorSource],
+            generic: 1,
+        };
+
+        let (spent, life_payments) = pay_cost(&mut pool, &cost).unwrap();
+
+        assert_eq!(spent.len(), 2);
+        assert!(spent
+            .iter()
+            .any(|unit| unit.source_could_produce_two_or_more_colors));
+        assert!(life_payments.is_empty());
+        assert_eq!(pool.total(), 0);
+    }
+
+    #[test]
+    fn pay_cost_rejects_z_from_ineligible_source() {
+        let mut pool = pool_with(&[(ManaType::Green, 2)]);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::TwoOrMoreColorSource],
+            generic: 0,
+        };
+
+        assert_eq!(
+            pay_cost(&mut pool, &cost),
+            Err(PaymentError::InsufficientMana)
+        );
+        assert_eq!(pool.total(), 2);
+    }
+
+    #[test]
+    fn pay_cost_preserves_z_eligible_mana_for_z_shard() {
+        let mut pool = ManaPool::default();
+        pool.add(make_two_or_more_color_source_unit(ManaType::Green));
+        pool.add(make_unit(ManaType::Green));
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::TwoOrMoreColorSource],
+            generic: 0,
+        };
+
+        let (spent, _) = pay_cost(&mut pool, &cost).unwrap();
+
+        assert_eq!(spent.len(), 2);
+        assert_eq!(pool.total(), 0);
     }
 
     // --- produce_mana tests ---
@@ -1878,6 +2034,7 @@ mod tests {
             color: ManaType::Green,
             source_id: ObjectId(1),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
             grants: vec![],
             expiry: None,
@@ -1924,6 +2081,7 @@ mod tests {
                 color: ManaType::Colorless,
                 source_id: ObjectId(1),
                 snow: false,
+                source_could_produce_two_or_more_colors: false,
                 restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities(
                     "Colorless Eldrazi".to_string(),
                 )],
@@ -1977,6 +2135,7 @@ mod tests {
             color: ManaType::Colorless,
             source_id: ObjectId(1),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKind(
                 crate::types::keywords::KeywordKind::Flashback,
             )],
@@ -2027,6 +2186,7 @@ mod tests {
             color: ManaType::Colorless,
             source_id: ObjectId(1),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKindFromZone(
                 crate::types::keywords::KeywordKind::Flashback,
                 crate::types::zones::Zone::Graveyard,
@@ -2067,6 +2227,7 @@ mod tests {
             color: ManaType::Green,
             source_id: ObjectId(1),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![],
             expiry: None,
@@ -2089,6 +2250,7 @@ mod tests {
             color: ManaType::Red,
             source_id: ObjectId(1),
             snow: false,
+            source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![],
             expiry: None,

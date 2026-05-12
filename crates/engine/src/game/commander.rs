@@ -873,6 +873,7 @@ mod tests {
                 color: ManaType::Red,
                 source_id: crate::types::identifiers::ObjectId(0),
                 snow: false,
+                source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
                 expiry: None,

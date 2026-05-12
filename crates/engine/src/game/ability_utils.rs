@@ -2713,6 +2713,7 @@ mod tests {
                         AbilityCost::ReturnToHand {
                             count: 1,
                             filter: Some(TargetFilter::SelfRef),
+                            from_zone: Some(Zone::Battlefield),
                         },
                     ],
                 }),
